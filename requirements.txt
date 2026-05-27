@@ -2,3 +2,4 @@ pymupdf
 reportlab
 requests
 pyinstaller
+pytest
