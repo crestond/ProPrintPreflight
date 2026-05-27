@@ -13,6 +13,15 @@ def test_detect_preset_from_filename_postcard_5x7():
     assert preset["expected_pages"] == 2
 
 
+def test_get_app_dir_uses_executable_parent_when_frozen(tmp_path, monkeypatch):
+    fake_exe = tmp_path / "ProPrintPreflightAgent.exe"
+
+    monkeypatch.setattr(app.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app.sys, "executable", str(fake_exe))
+
+    assert app.get_app_dir() == tmp_path
+
+
 def test_safe_move_file_avoids_overwriting_existing_file(tmp_path):
     incoming = tmp_path / "Incoming"
     passed = tmp_path / "Passed"

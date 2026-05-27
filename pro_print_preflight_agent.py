@@ -66,8 +66,14 @@ except Exception:
 # LOGGING
 # =========================
 
-LOG_FILE = Path(__file__).resolve().parent / "pro_print_runtime.log"
-SCRIPT_DIR = Path(__file__).resolve().parent
+def get_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+SCRIPT_DIR = get_app_dir()
+LOG_FILE = SCRIPT_DIR / "pro_print_runtime.log"
 
 logging.basicConfig(
     filename=str(LOG_FILE),
