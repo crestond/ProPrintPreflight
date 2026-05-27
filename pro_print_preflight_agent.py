@@ -1141,6 +1141,7 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
         story.append(Paragraph(text, summary_style))
 
         if p.dpi_records:
+            story.append(Spacer(1, 0.08 * inch))
             dpi_rows = [["Placed Size", "Pixels", "Effective DPI"]]
             for rec in p.dpi_records[:20]:
                 dpi_rows.append([
