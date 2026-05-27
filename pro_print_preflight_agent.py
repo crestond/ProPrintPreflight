@@ -97,6 +97,7 @@ WATCH_INTERVAL_SECONDS = 5
 PROCESS_ONCE = False  # True = process existing PDFs once and exit, False = keep watching
 FILE_STABLE_SECONDS = 2
 FILE_READY_TIMEOUT_SECONDS = 60
+LARGE_PDF_WARNING_MB = 250
 
 # ---- Print rules ----
 DEFAULT_BLEED_IN = 0.125
@@ -223,6 +224,7 @@ def load_config() -> None:
     """Load optional config.json without changing built-in defaults on failure."""
     global BASE_DIR, INCOMING_DIR, PASSED_DIR, NEEDS_FIX_DIR, REPORTS_DIR, LOGS_DIR, REJECTED_DIR
     global WATCH_INTERVAL_SECONDS, PROCESS_ONCE, FILE_STABLE_SECONDS, FILE_READY_TIMEOUT_SECONDS
+    global LARGE_PDF_WARNING_MB
     global MIN_DPI, TARGET_DPI, STRICT_RGB_FAIL, AUTO_RENAME_PRINT_READY, AUTO_REJECT_FAILED
     global ENABLE_SLACK, SLACK_WEBHOOK_URL, ENABLE_EMAIL, EMAIL_FROM, EMAIL_TO
     global SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD
@@ -260,6 +262,7 @@ def load_config() -> None:
         FILE_STABLE_SECONDS + 1,
         _config_int(config, "file_ready_timeout_seconds", FILE_READY_TIMEOUT_SECONDS),
     )
+    LARGE_PDF_WARNING_MB = max(1, _config_int(config, "large_pdf_warning_mb", LARGE_PDF_WARNING_MB))
 
     MIN_DPI = _config_int(config, "min_dpi", MIN_DPI)
     TARGET_DPI = _config_int(config, "target_dpi", TARGET_DPI)
@@ -364,6 +367,13 @@ def format_image_location(record: Dict[str, Any]) -> str:
     if x_in is None or y_in is None:
         return "not available"
     return f"x {x_in:.3f} in, y {y_in:.3f} in"
+
+
+def format_file_size(size_bytes: int) -> str:
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb >= 1024:
+        return f"{size_mb / 1024:.2f} GB"
+    return f"{size_mb:.2f} MB"
 
 
 def detect_preset_from_filename(filename: str) -> Dict[str, Any]:
@@ -1222,11 +1232,27 @@ def build_notification_message(analysis: Dict[str, Any], moved_to: Path, report_
 
 
 def process_pdf(pdf_path: Path) -> None:
-    logging.info(f"Processing PDF: {pdf_path.name}")
+    process_start = time.monotonic()
+    try:
+        file_size_bytes = pdf_path.stat().st_size
+    except OSError:
+        file_size_bytes = 0
+
+    logging.info(f"Processing PDF: {pdf_path.name} ({format_file_size(file_size_bytes)})")
+    if file_size_bytes >= LARGE_PDF_WARNING_MB * 1024 * 1024:
+        logging.warning(
+            f"Large PDF detected: {pdf_path.name} is {format_file_size(file_size_bytes)} "
+            f"(warning threshold: {LARGE_PDF_WARNING_MB} MB). Processing may take longer."
+        )
 
     try:
+        analysis_start = time.monotonic()
         analysis = analyze_pdf(pdf_path)
+        logging.info(f"Analysis completed for {pdf_path.name} in {time.monotonic() - analysis_start:.2f}s")
+
+        report_start = time.monotonic()
         report_path = generate_pdf_report(analysis)
+        logging.info(f"Report generation completed for {pdf_path.name} in {time.monotonic() - report_start:.2f}s")
 
         if analysis["print_ready"] == "YES":
             new_name = maybe_rename_print_ready_file(pdf_path, analysis)
@@ -1260,10 +1286,11 @@ def process_pdf(pdf_path: Path) -> None:
 
         message = build_notification_message(analysis, moved_to, report_path)
         send_slack_notification(message)
-        send_email_notification(f"Preflight Result — {analysis['file'].name}", message)
+        send_email_notification(f"Preflight Result - {analysis['file'].name}", message)
+        logging.info(f"Finished processing {moved_to.name} in {time.monotonic() - process_start:.2f}s")
 
     except Exception as exc:
-        logging.exception(f"Failed to process {pdf_path.name}: {exc}")
+        logging.exception(f"Failed to process {pdf_path.name} after {time.monotonic() - process_start:.2f}s: {exc}")
 
 
 # =========================
