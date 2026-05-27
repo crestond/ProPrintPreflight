@@ -34,6 +34,7 @@ python3 preflight_agent_v4_0.py
 from __future__ import annotations
 
 import csv
+from html import escape
 import json
 import logging
 import math
@@ -975,16 +976,20 @@ def build_brand_header(print_ready: str) -> List[Paragraph]:
     if print_ready == "YES":
         lines = [
             Paragraph("PRO PRINT PREFLIGHT REPORT", title_style),
-            Paragraph("JOB STATUS: PRINT READY ✅", body_style),
+            Paragraph("JOB STATUS: PRINT READY", body_style),
             Paragraph("DEPARTMENT: PREPRESS AUTOMATION", body_style),
         ]
     else:
         lines = [
             Paragraph("PRO PRINT PREFLIGHT REPORT", title_style),
-            Paragraph("JOB STATUS: NEEDS ATTENTION 🚨", body_style),
+            Paragraph("JOB STATUS: NEEDS ATTENTION", body_style),
             Paragraph("DEPARTMENT: PREPRESS AUTOMATION", body_style),
         ]
     return lines
+
+
+def report_cell(value: Any, style: ParagraphStyle) -> Paragraph:
+    return Paragraph(escape(str(value)), style)
 
 
 def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
@@ -1002,12 +1007,27 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
     )
     styles = getSampleStyleSheet()
     story = []
+    table_header_style = ParagraphStyle(
+        "ReportTableHeader",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=10,
+        wordWrap="CJK",
+    )
+    table_cell_style = ParagraphStyle(
+        "ReportTableCell",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
+        wordWrap="CJK",
+    )
 
     if BRANDED_REPORT_MODE:
         story.extend(build_brand_header(analysis["print_ready"]))
         story.append(Spacer(1, 0.2 * inch))
 
-    title = Paragraph(f"Preflight Report — {pdf_path.name}", styles["Title"])
+    title = Paragraph(f"Preflight Report - {escape(pdf_path.name)}", styles["Title"])
     story.append(title)
     story.append(Spacer(1, 0.15 * inch))
 
@@ -1020,18 +1040,29 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
     story.append(subtitle)
     story.append(Spacer(1, 0.2 * inch))
 
-    result_table_data = [["Check", "Status", "Details"]]
+    result_table_data = [[
+        report_cell("Check", table_header_style),
+        report_cell("Status", table_header_style),
+        report_cell("Details", table_header_style),
+    ]]
     for check_name, result in analysis["results"].items():
-        result_table_data.append([check_name.replace("_", " ").title(), result.status, result.details])
+        result_table_data.append([
+            report_cell(check_name.replace("_", " ").title(), table_cell_style),
+            report_cell(result.status, table_cell_style),
+            report_cell(result.details, table_cell_style),
+        ])
 
-    table = Table(result_table_data, colWidths=[1.3 * inch, 1.1 * inch, 4.9 * inch])
+    table = Table(result_table_data, colWidths=[1.15 * inch, 0.85 * inch, 5.3 * inch], repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.beige]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.whitesmoke]),
     ]))
     story.append(table)
     story.append(Spacer(1, 0.25 * inch))
