@@ -1007,12 +1007,44 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
     )
     styles = getSampleStyleSheet()
     story = []
+    report_title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=19,
+        leading=23,
+        spaceAfter=6,
+    )
+    section_heading_style = ParagraphStyle(
+        "ReportSectionHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    page_heading_style = ParagraphStyle(
+        "ReportPageHeading",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=12,
+        spaceBefore=8,
+        spaceAfter=3,
+    )
+    summary_style = ParagraphStyle(
+        "ReportSummary",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=12,
+    )
     table_header_style = ParagraphStyle(
         "ReportTableHeader",
         parent=styles["BodyText"],
         fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=10,
+        fontSize=8.5,
+        leading=10.5,
         wordWrap="CJK",
     )
     table_cell_style = ParagraphStyle(
@@ -1027,7 +1059,7 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
         story.extend(build_brand_header(analysis["print_ready"]))
         story.append(Spacer(1, 0.2 * inch))
 
-    title = Paragraph(f"Preflight Report - {escape(pdf_path.name)}", styles["Title"])
+    title = Paragraph(f"Preflight Report - {escape(pdf_path.name)}", report_title_style)
     story.append(title)
     story.append(Spacer(1, 0.15 * inch))
 
@@ -1035,11 +1067,40 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br/>"
         f"Preset: {analysis['preset'].get('name', 'generic_print_job')}<br/>"
         f"PRINT READY: <b>{analysis['print_ready']}</b>",
-        styles["BodyText"],
+        summary_style,
     )
     story.append(subtitle)
-    story.append(Spacer(1, 0.2 * inch))
+    story.append(Spacer(1, 0.16 * inch))
 
+    story.append(Paragraph("Trim And Bleed Summary", section_heading_style))
+    box_table_data = [[
+        report_cell("Page", table_header_style),
+        report_cell("TrimBox / Chosen Trim", table_header_style),
+        report_cell("BleedBox / Fallback Bleed", table_header_style),
+    ]]
+    for p in analysis["page_diags"]:
+        box_table_data.append([
+            report_cell(p.page_number, table_cell_style),
+            report_cell(format_size(p.trim_size), table_cell_style),
+            report_cell(format_size(p.bleed_size), table_cell_style),
+        ])
+
+    box_table = Table(box_table_data, colWidths=[0.65 * inch, 3.25 * inch, 3.25 * inch], repeatRows=1)
+    box_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.whitesmoke]),
+    ]))
+    story.append(box_table)
+    story.append(Spacer(1, 0.22 * inch))
+
+    story.append(Paragraph("Check Summary", section_heading_style))
     result_table_data = [[
         report_cell("Check", table_header_style),
         report_cell("Status", table_header_style),
@@ -1065,21 +1126,19 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.whitesmoke]),
     ]))
     story.append(table)
-    story.append(Spacer(1, 0.25 * inch))
+    story.append(Spacer(1, 0.32 * inch))
 
-    story.append(Paragraph("Per-Page Diagnostics", styles["Heading2"]))
+    story.append(Paragraph("Additional Page Diagnostics", section_heading_style))
     for p in analysis["page_diags"]:
-        story.append(Paragraph(f"Page {p.page_number}", styles["Heading3"]))
+        story.append(Paragraph(f"Page {p.page_number}", page_heading_style))
         text = (
-            f"TrimBox / chosen trim: {format_size(p.trim_size)}<br/>"
-            f"BleedBox / fallback bleed: {format_size(p.bleed_size)}<br/>"
             f"CropBox: {format_size(p.crop_size)}<br/>"
             f"MediaBox: {format_size(p.media_size)}<br/>"
             f"rect: {format_size(p.rect_size)}<br/>"
             f"Has content: {'YES' if p.page_has_content else 'NO'}<br/>"
             f"Image color spaces: {', '.join(p.image_color_spaces) if p.image_color_spaces else 'none'}"
         )
-        story.append(Paragraph(text, styles["BodyText"]))
+        story.append(Paragraph(text, summary_style))
 
         if p.dpi_records:
             dpi_rows = [["Placed Size", "Pixels", "Effective DPI"]]
