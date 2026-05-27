@@ -358,6 +358,14 @@ def format_size(size: Optional[Tuple[float, float]]) -> str:
     return f"{size[0]:.3f} x {size[1]:.3f}"
 
 
+def format_image_location(record: Dict[str, Any]) -> str:
+    x_in = record.get("x_in")
+    y_in = record.get("y_in")
+    if x_in is None or y_in is None:
+        return "not available"
+    return f"x {x_in:.3f} in, y {y_in:.3f} in"
+
+
 def detect_preset_from_filename(filename: str) -> Dict[str, Any]:
     lower_name = filename.lower()
     best_name = None
@@ -491,8 +499,11 @@ def compute_image_dpi(page: fitz.Page, img_xref: int, img_width_px: int, img_hei
         image_rects = []
 
     for rect in image_rects:
+        page_rect = page.rect
         width_in = inches_from_points(rect.width) if rect.width else 0
         height_in = inches_from_points(rect.height) if rect.height else 0
+        x_in = inches_from_points(rect.x0 - page_rect.x0)
+        y_in = inches_from_points(rect.y0 - page_rect.y0)
 
         x_dpi = (img_width_px / width_in) if width_in > 0 else 0
         y_dpi = (img_height_px / height_in) if height_in > 0 else 0
@@ -501,6 +512,8 @@ def compute_image_dpi(page: fitz.Page, img_xref: int, img_width_px: int, img_hei
         records.append({
             "placed_width_in": round2(width_in),
             "placed_height_in": round2(height_in),
+            "x_in": round2(x_in),
+            "y_in": round2(y_in),
             "pixel_width": img_width_px,
             "pixel_height": img_height_px,
             "x_dpi": round(x_dpi) if x_dpi else 0,
@@ -704,7 +717,8 @@ def check_dpi(page_diags: List[PageDiagnostics]) -> CheckResult:
 
     if low_records:
         details = "Low effective DPI detected: " + ", ".join(
-            f"page {r['page']} ({r['effective_dpi']} dpi)" for r in low_records[:12]
+            f"page {r['page']} ({r['effective_dpi']} dpi, {format_image_location(r)})"
+            for r in low_records[:12]
         )
         return CheckResult(
             status="FAIL",
@@ -1142,18 +1156,28 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
 
         if p.dpi_records:
             story.append(Spacer(1, 0.08 * inch))
-            dpi_rows = [["Placed Size", "Pixels", "Effective DPI"]]
+            dpi_rows = [[
+                report_cell("Placed Size", table_header_style),
+                report_cell("Pixels", table_header_style),
+                report_cell("Effective DPI", table_header_style),
+                report_cell("Location", table_header_style),
+            ]]
             for rec in p.dpi_records[:20]:
                 dpi_rows.append([
-                    f"{rec['placed_width_in']} x {rec['placed_height_in']} in",
-                    f"{rec['pixel_width']} x {rec['pixel_height']}",
-                    str(rec['effective_dpi']),
+                    report_cell(f"{rec['placed_width_in']} x {rec['placed_height_in']} in", table_cell_style),
+                    report_cell(f"{rec['pixel_width']} x {rec['pixel_height']}", table_cell_style),
+                    report_cell(rec["effective_dpi"], table_cell_style),
+                    report_cell(format_image_location(rec), table_cell_style),
                 ])
-            dpi_table = Table(dpi_rows, colWidths=[2.0 * inch, 2.0 * inch, 1.5 * inch])
+            dpi_table = Table(dpi_rows, colWidths=[1.6 * inch, 1.45 * inch, 1.2 * inch, 2.05 * inch], repeatRows=1)
             dpi_table.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
             ]))
             story.append(dpi_table)
         else:
