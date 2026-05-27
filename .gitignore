@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime logs
+*.log
+pro_print_runtime.log
+
+# Local config/secrets
+.env
+*.env
+
+# Preflight generated/runtime files
+Preflight_System/Incoming/*
+Preflight_System/Passed/*
+Preflight_System/Needs_Fix/*
+Preflight_System/Rejected/*
+Preflight_System/Reports/*
+Preflight_System/Logs/*
+
+# Keep folder structure if you add placeholder files later
+!Preflight_System/Incoming/.gitkeep
+!Preflight_System/Passed/.gitkeep
+!Preflight_System/Needs_Fix/.gitkeep
+!Preflight_System/Rejected/.gitkeep
+!Preflight_System/Reports/.gitkeep
+!Preflight_System/Logs/.gitkeep
+
+# Build/package output
+build/
+dist/
+*.spec
+*.exe
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

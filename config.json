@@ -1,0 +1,9 @@
+{
+    "base_dir": "Preflight_System",
+    "watch_interval_seconds": 5,
+    "min_dpi": 225,
+    "target_dpi": 300,
+    "strict_rgb_fail": false,
+    "auto_rename_print_ready": false,
+    "auto_reject_failed": false
+}

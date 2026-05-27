@@ -1,0 +1,4 @@
+pymupdf
+reportlab
+requests
+pyinstaller
