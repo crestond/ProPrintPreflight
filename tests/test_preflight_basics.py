@@ -22,6 +22,26 @@ def test_get_app_dir_uses_executable_parent_when_frozen(tmp_path, monkeypatch):
     assert app.get_app_dir() == tmp_path
 
 
+def test_validate_pdf_file_rejects_non_pdf(tmp_path):
+    text_file = tmp_path / "not-a-pdf.txt"
+    text_file.write_text("hello", encoding="utf-8")
+
+    result = app.validate_pdf_file(text_file)
+
+    assert not result.is_valid
+    assert result.reason == "Not a PDF file"
+
+
+def test_validate_pdf_file_rejects_empty_pdf(tmp_path):
+    pdf = tmp_path / "empty.pdf"
+    pdf.write_bytes(b"")
+
+    result = app.validate_pdf_file(pdf)
+
+    assert not result.is_valid
+    assert result.reason == "Empty file"
+
+
 def test_safe_move_file_avoids_overwriting_existing_file(tmp_path):
     incoming = tmp_path / "Incoming"
     passed = tmp_path / "Passed"

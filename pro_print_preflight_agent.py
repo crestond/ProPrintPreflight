@@ -316,6 +316,12 @@ class PageDiagnostics:
     page_has_content: bool = True
     image_color_spaces: List[str] = field(default_factory=list)
 
+@dataclass
+class PdfValidationResult:
+    is_valid: bool
+    reason: str = ""
+    is_repaired: bool = False
+    page_count: int = 0
 
 # =========================
 # HELPERS
@@ -576,6 +582,21 @@ def append_csv_log(row: Dict[str, Any]) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def append_rejected_csv_log(file_path: Path, reason: str) -> None:
+    append_csv_log({
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "filename": file_path.name,
+        "preset": "n/a",
+        "print_ready": "NO",
+        "destination": "Rejected",
+        "issues": reason,
+        "warnings": "",
+        "min_dpi": "",
+        "color_summary": "",
+        "page_count": "",
+    })
 
 
 def send_slack_notification(message: str) -> None:
@@ -1252,6 +1273,15 @@ def process_pdf(pdf_path: Path) -> None:
         )
 
     try:
+        validation = validate_pdf_file(pdf_path)
+        if not validation.is_valid:
+            reject_file(pdf_path, validation.reason)
+            append_rejected_csv_log(pdf_path, validation.reason)
+            logging.info(f"Finished rejecting {pdf_path.name} in {time.monotonic() - process_start:.2f}s")
+            return
+        if validation.is_repaired:
+            logging.warning(f"PDF required repair during open: {pdf_path.name}")
+
         analysis_start = time.monotonic()
         analysis = analyze_pdf(pdf_path)
         logging.info(f"Analysis completed for {pdf_path.name} in {time.monotonic() - analysis_start:.2f}s")
@@ -1297,14 +1327,44 @@ def process_pdf(pdf_path: Path) -> None:
 
     except Exception as exc:
         logging.exception(f"Failed to process {pdf_path.name} after {time.monotonic() - process_start:.2f}s: {exc}")
+        if pdf_path.exists():
+            reason = f"Processing failed: {exc}"
+            reject_file(pdf_path, reason)
+            append_rejected_csv_log(pdf_path, reason)
 
+def validate_pdf_file(pdf_path: Path) -> PdfValidationResult:
+    if pdf_path.suffix.lower() != ".pdf":
+        return PdfValidationResult(is_valid=False, reason="Not a PDF file")
+
+    try:
+        if pdf_path.stat().st_size <= 0:
+            return PdfValidationResult(is_valid=False, reason="Empty file")
+    except OSError as exc:
+        return PdfValidationResult(is_valid=False, reason=f"Could not read file metadata: {exc}")
+
+    try:
+        with fitz.open(pdf_path) as doc:
+            if not doc.is_pdf:
+                return PdfValidationResult(is_valid=False, reason="File is not recognized as a PDF")
+            if len(doc) <= 0:
+                return PdfValidationResult(is_valid=False, reason="PDF has no pages")
+
+            doc.load_page(0)
+            return PdfValidationResult(
+                is_valid=True,
+                reason="OK",
+                is_repaired=bool(getattr(doc, "is_repaired", False)),
+                page_count=len(doc),
+            )
+    except Exception as exc:
+        return PdfValidationResult(is_valid=False, reason=f"Could not open PDF: {exc}")
 
 # =========================
 # WATCHER
 # =========================
 
-def get_incoming_pdfs() -> List[Path]:
-    return sorted([p for p in INCOMING_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".pdf"])
+def get_incoming_files() -> List[Path]:
+    return sorted([p for p in INCOMING_DIR.iterdir() if p.is_file()])
 
 
 def wait_until_file_is_ready(
@@ -1350,6 +1410,9 @@ def wait_until_file_is_ready(
     logging.warning(f"Timed out waiting for file to finish copying: {pdf_path}")
     return False
 
+def reject_file(file_path: Path, reason: str) -> Path:
+    logging.warning(f"Rejecting file {file_path.name}: {reason}")
+    return safe_move_file(file_path, REJECTED_DIR)
 
 def watch_loop() -> None:
     load_config()
@@ -1361,20 +1424,26 @@ def watch_loop() -> None:
 
     while True:
         try:
-            pdfs = get_incoming_pdfs()
-            if pdfs:
-                for pdf in pdfs:
-                    key = str(pdf.resolve())
-                    mtime = pdf.stat().st_mtime
+            incoming_files = get_incoming_files()
+            if incoming_files:
+                for incoming_file in incoming_files:
+                    key = str(incoming_file.resolve())
+                    mtime = incoming_file.stat().st_mtime
                     last_seen = processed_recently.get(key)
                     if last_seen is not None and math.isclose(last_seen, mtime, rel_tol=0.0, abs_tol=0.0):
                         continue
 
-                    if not wait_until_file_is_ready(pdf):
+                    if not wait_until_file_is_ready(incoming_file):
                         continue
 
-                    processed_recently[key] = pdf.stat().st_mtime
-                    process_pdf(pdf)
+                    if incoming_file.suffix.lower() != ".pdf":
+                        reason = "Not a PDF file"
+                        reject_file(incoming_file, reason)
+                        append_rejected_csv_log(incoming_file, reason)
+                        continue
+
+                    processed_recently[key] = incoming_file.stat().st_mtime
+                    process_pdf(incoming_file)
 
                 if PROCESS_ONCE:
                     logging.info("PROCESS_ONCE enabled. Exiting after one pass.")
