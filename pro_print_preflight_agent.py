@@ -1387,15 +1387,13 @@ def wait_until_file_is_ready(
             with open(pdf_path, "rb"):
                 pass
 
-            if stat.st_size <= 0:
-                stable_since = None
-            elif signature == last_signature:
+            if signature == last_signature:
                 if stable_since is None:
                     stable_since = time.time()
                 if time.time() - stable_since >= max(stable_seconds, 1):
                     return True
             else:
-                stable_since = None
+                stable_since = time.time()
                 last_signature = signature
 
         except FileNotFoundError:
