@@ -38,6 +38,8 @@ from html import escape
 import json
 import logging
 import math
+import re
+import secrets
 import shutil
 import smtplib
 import sys
@@ -633,6 +635,19 @@ def send_email_notification(subject: str, body: str) -> None:
     except Exception as exc:
         logging.error(f"Email notification failed: {exc}")
 
+def build_job_id() -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    random_part = secrets.token_hex(4)  # 8 hex characters for uniqueness
+    return f"job_{timestamp}_{random_part}"
+
+def extract_company_job_number(filename: str) -> Optional[str]:
+    match = re.match(r"^(\d{6})(?:[\s_-]|$)", filename)
+    return match.group(1) if match else None
+
+def relative_to_base(path: Path) -> str:
+    # Returns a POSIX-style relative path from BASE_DIR to the given path, for cleaner logging.
+    return path.resolve().relative_to(BASE_DIR.resolve().as_posix())
 
 # =========================
 # CHECKS
