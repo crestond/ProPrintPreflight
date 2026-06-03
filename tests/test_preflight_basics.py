@@ -1,6 +1,7 @@
 # Basic test suite for ProPrintPreflight. This is not meant to be exhaustive, but it should cover the basics of the preflight process.
 
 from pathlib import Path
+import re
 
 import pro_print_preflight_agent as app
 
@@ -91,3 +92,26 @@ def test_ensure_directories_creates_expected_folders(tmp_path, monkeypatch):
     assert (base_dir / "Reports").is_dir()
     assert (base_dir / "Logs").is_dir()
     assert (base_dir / "Rejected").is_dir()
+
+def test_build_job_id_format():
+    job_id = app.build_job_id()
+
+    assert re.match(r"^job_\d{8}_\d{6}_[0-9a-f]{8}$", job_id)
+
+def test_extract_company_job_number_from_start():
+    assert app.extract_company_job_number("123456_customer_job.pdf") == "123456"
+    assert app.extract_company_job_number("123456 customer_job.pdf") == "123456"
+    assert app.extract_company_job_number("674591-customer_job.pdf") == "674591"
+
+def test_extract_company_job_number_not_start():
+    assert app.extract_company_job_number("00001_customer_job.pdf") is None
+    assert app.extract_company_job_number("customer_123456_job.pdf") is None
+    assert app.extract_company_job_number("job_123456.pdf") is None
+
+def test_relative_to_base_returns_posix_relative_path(tmp_path, monkeypatch):
+    base_dir = tmp_path / "Preflight_System"
+    report = base_dir / "Reports" / "report.pdf"
+
+    monkeypatch.setattr(app, "BASE_DIR", base_dir)
+
+    assert app.relative_to_base(report) == "Reports/report.pdf"

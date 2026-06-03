@@ -646,8 +646,8 @@ def extract_company_job_number(filename: str) -> Optional[str]:
     return match.group(1) if match else None
 
 def relative_to_base(path: Path) -> str:
-    # Returns a POSIX-style relative path from BASE_DIR to the given path, for cleaner logging.
-    return path.resolve().relative_to(BASE_DIR.resolve().as_posix())
+    # Returns a POSIX-style relative path from BASE_DIR to the given path, for cleaner logging and a reliable path for structure changes.
+    return path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
 
 # =========================
 # CHECKS
