@@ -4,7 +4,7 @@ Pro Print Preflight Agent V4.0 — Print Shop Mode
 
 What it does
 ------------
-- Watches a Google Drive Incoming folder for PDFs
+- Watches an Incoming folder for PDFs
 - Auto-detects job presets from the filename (no popup required)
 - Runs print preflight checks:
   * trim / bleed
@@ -100,6 +100,7 @@ NEEDS_FIX_DIR = BASE_DIR / "Needs_Fix"
 REPORTS_DIR = BASE_DIR / "Reports"
 LOGS_DIR = BASE_DIR / "Logs"
 REJECTED_DIR = BASE_DIR / "Rejected"  # optional add-on target, not used by default
+METADATA_DIR = BASE_DIR / "Metadata"
 
 WATCH_INTERVAL_SECONDS = 5
 PROCESS_ONCE = False  # True = process existing PDFs once and exit, False = keep watching
@@ -230,7 +231,7 @@ def _config_int(config: Dict[str, Any], key: str, current: int) -> int:
 
 def load_config() -> None:
     """Load optional config.json without changing built-in defaults on failure."""
-    global BASE_DIR, INCOMING_DIR, PASSED_DIR, NEEDS_FIX_DIR, REPORTS_DIR, LOGS_DIR, REJECTED_DIR
+    global BASE_DIR, INCOMING_DIR, PASSED_DIR, NEEDS_FIX_DIR, REPORTS_DIR, LOGS_DIR, REJECTED_DIR, METADATA_DIR
     global WATCH_INTERVAL_SECONDS, PROCESS_ONCE, FILE_STABLE_SECONDS, FILE_READY_TIMEOUT_SECONDS
     global LARGE_PDF_WARNING_MB
     global MIN_DPI, TARGET_DPI, STRICT_RGB_FAIL, AUTO_RENAME_PRINT_READY, AUTO_REJECT_FAILED
@@ -262,6 +263,7 @@ def load_config() -> None:
     REPORTS_DIR = BASE_DIR / "Reports"
     LOGS_DIR = BASE_DIR / "Logs"
     REJECTED_DIR = BASE_DIR / "Rejected"
+    METADATA_DIR = BASE_DIR / "Metadata"
 
     WATCH_INTERVAL_SECONDS = max(1, _config_int(config, "watch_interval_seconds", WATCH_INTERVAL_SECONDS))
     PROCESS_ONCE = _config_bool(config, "process_once", PROCESS_ONCE)
@@ -648,6 +650,62 @@ def extract_company_job_number(filename: str) -> Optional[str]:
 def relative_to_base(path: Path) -> str:
     # Returns a POSIX-style relative path from BASE_DIR to the given path, for cleaner logging and a reliable path for structure changes.
     return path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+
+def create_job_metadata(pdf_path: Path) -> Dict[str, Any]:
+    job_id = build_job_id()
+    return {
+        "schemaVersion": 1,
+        "jobId": job_id,
+        "source": "manual_drop",
+        "originalFilename": pdf_path.name,
+        "storedFilename": pdf_path.name,
+        "companyJobNumber": extract_company_job_number(pdf_path.name),
+        "status": "Pending",
+        "printReady": None,
+        "createdAt": datetime.now().isoformat(timespec="seconds"),
+        "processingStartedAt": None,
+        "processingFinishedAt": None,
+        "fileSizeBytes": pdf_path.stat().st_size,
+        "finalPdfPath": None,
+        "reportPath": None,
+        "summary": None,
+        "issues": [],
+        "warnings": [],
+        "trimBleed": {
+            "trimStatus": None,
+            "bleedStatus": None,
+            "trimDetails": None,
+            "bleedDetails": None,
+        },
+        "errorMessage": None
+    }
+
+def write_job_metadata(metadata: Dict[str, Any]) -> Path:
+    job_id = metadata.get("jobId")
+    if not job_id:
+        raise ValueError("metadata must contain jobId.")
+    
+    METADATA_DIR.mkdir(parents=True, exist_ok=True)
+    metadata_path = METADATA_DIR / f"{job_id}.json"
+
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+    return metadata_path
+
+def load_job_metadata(job_id: str) -> Optional[Dict[str, Any]]:
+    metadata_path = METADATA_DIR / f"{job_id}.json"
+
+    if not metadata_path.exists():
+        return None
+    
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
+def update_job_metadata(metadata: Dict[str, Any], **updates: Any) -> Path:
+    metadata.update(updates)
+    return write_job_metadata(metadata)
+    
 
 # =========================
 # CHECKS

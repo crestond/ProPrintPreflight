@@ -115,3 +115,108 @@ def test_relative_to_base_returns_posix_relative_path(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "BASE_DIR", base_dir)
 
     assert app.relative_to_base(report) == "Reports/report.pdf"
+
+def test_create_job_metadata_uses_minimal_pending_shape(tmp_path):
+    pdf = tmp_path / "123456 CompanyBrochure.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+
+    metadata = app.create_job_metadata(pdf)
+
+    assert metadata["schemaVersion"] == 1
+    assert metadata["jobId"].startswith("job_")
+    assert metadata["source"] == "manual_drop"
+    assert metadata["originalFilename"] == "123456 CompanyBrochure.pdf"
+    assert metadata["storedFilename"] == "123456 CompanyBrochure.pdf"
+    assert metadata["companyJobNumber"] == "123456"
+    assert metadata["status"] == "Pending"
+    assert metadata["printReady"] is None
+    assert metadata["fileSizeBytes"] == pdf.stat().st_size
+    assert metadata["finalPdfPath"] is None
+    assert metadata["reportPath"] is None
+    assert metadata["summary"] is None
+    assert metadata["issues"] == []
+    assert metadata["warnings"] == []
+    assert metadata["errorMessage"] is None
+
+
+def test_create_job_metadata_initializes_trim_bleed(tmp_path):
+    pdf = tmp_path / "NoJobNumber.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+
+    metadata = app.create_job_metadata(pdf)
+
+    assert metadata["companyJobNumber"] is None
+    assert metadata["trimBleed"] == {
+        "trimStatus": None,
+        "bleedStatus": None,
+        "trimDetails": None,
+        "bleedDetails": None,
+    }
+
+def test_write_job_metadata_creates_json_file(tmp_path, monkeypatch):
+    metadata_dir = tmp_path / "Metadata"
+    monkeypatch.setattr(app, "METADATA_DIR", metadata_dir)
+
+    metadata = {
+        "schemaVersion": 1,
+        "jobId": "job_20240604_101530_abcd1234",
+        "status": "Pending",
+        "originalFilename": "test.pdf",
+    }
+
+    metadata_path = app.write_job_metadata(metadata)
+
+    assert metadata_path == metadata_dir / "job_20240604_101530_abcd1234.json"
+    assert metadata_path.exists()
+
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        saved_metadata = app.json.load(f)
+    
+    assert saved_metadata == metadata
+
+def test_load_job_metadata_reads_existing_json(tmp_path, monkeypatch):
+    metadata_dir = tmp_path / "Metadata"
+    metadata_dir.mkdir()
+    monkeypatch.setattr(app, "METADATA_DIR", metadata_dir)
+
+    metadata = {
+        "schemaVersion": 1,
+        "jobId": "job_20260604_101530_abcd1234",
+        "status": "Pending",
+    }
+
+    metadata_path = metadata_dir / "job_20260604_101530_abcd1234.json"
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        app.json.dump(metadata, f)
+
+    loaded = app.load_job_metadata("job_20260604_101530_abcd1234")
+
+    assert loaded == metadata
+
+def test_load_job_metadata_returns_none_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "METADATA_DIR", tmp_path / "Metadata")
+
+    assert app.load_job_metadata("missing_job") is None
+
+def test_update_job_metadata_updates_fields_and_writes_file(tmp_path, monkeypatch):
+    metadata_dir = tmp_path / "Metadata"
+    monkeypatch.setattr(app, "METADATA_DIR", metadata_dir)
+
+    metadata = {
+        "schemaVersion": 1,
+        "jobId": "job_20260604_101530_abcd1234",
+        "status": "Pending",
+        "printReady": None,
+    }
+
+    metadata_path = app.update_job_metadata(
+        metadata,
+        status="Processing",
+        printReady=False,
+    )
+
+    loaded = app.load_job_metadata("job_20260604_101530_abcd1234")
+
+    assert metadata_path == metadata_dir / "job_20260604_101530_abcd1234.json"
+    assert loaded["status"] == "Processing"
+    assert loaded["printReady"] is False
