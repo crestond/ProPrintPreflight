@@ -333,7 +333,7 @@ class PdfValidationResult:
 
 def ensure_directories() -> None:
     logging.info(f"Resolved BASE_DIR: {BASE_DIR.resolve()}")
-    for folder in [INCOMING_DIR, PASSED_DIR, NEEDS_FIX_DIR, REPORTS_DIR, LOGS_DIR, REJECTED_DIR]:
+    for folder in [INCOMING_DIR, PASSED_DIR, NEEDS_FIX_DIR, REPORTS_DIR, LOGS_DIR, REJECTED_DIR, METADATA_DIR]:
         logging.info(f"Using folder: {folder.resolve()}")
         folder.mkdir(parents=True, exist_ok=True)
 
@@ -1344,13 +1344,32 @@ def process_pdf(pdf_path: Path) -> None:
             f"Large PDF detected: {pdf_path.name} is {format_file_size(file_size_bytes)} "
             f"(warning threshold: {LARGE_PDF_WARNING_MB} MB). Processing may take longer."
         )
+    
+    metadata = create_job_metadata(pdf_path)
+    write_job_metadata(metadata)
+
+    update_job_metadata(
+        metadata,
+        status="Processing",
+        processingStartedAt=datetime.now().isoformat(timespec="seconds")
+    )
 
     try:
         validation = validate_pdf_file(pdf_path)
         if not validation.is_valid:
-            reject_file(pdf_path, validation.reason)
+            rejected_path = reject_file(pdf_path, validation.reason)
             append_rejected_csv_log(pdf_path, validation.reason)
             logging.info(f"Finished rejecting {pdf_path.name} in {time.monotonic() - process_start:.2f}s")
+            
+            update_job_metadata(
+                metadata,
+                status="Rejected",
+                processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
+                summary="File was rejected before preflight analysis.",
+                errorMessage=validation.reason,
+                finalPdfPath=relative_to_base(rejected_path),
+            )
+            
             return
         if validation.is_repaired:
             logging.warning(f"PDF required repair during open: {pdf_path.name}")
@@ -1380,6 +1399,26 @@ def process_pdf(pdf_path: Path) -> None:
         logging.info(f"Report written: {report_path}")
 
         results = analysis["results"]
+
+        update_job_metadata(
+            metadata,
+            status=destination_label,
+            printReady=(analysis["print_ready"] == "YES"),
+            processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
+            finalPdfPath=relative_to_base(moved_to),
+            reportPath=relative_to_base(report_path),
+            summary=f"PDF analyzed and marked as {analysis['print_ready']}.",
+            issues=analysis["fails"],
+            warnings=analysis["warnings"],
+            trimBleed={
+                "trimStatus": results["trim"].status,
+                "bleedStatus": results["bleed"].status,
+                "trimDetails": results["trim"].details,
+                "bleedDetails": results["bleed"].details
+            }
+        )
+
+
         append_csv_log({
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "filename": analysis["file"].name,
@@ -1400,10 +1439,21 @@ def process_pdf(pdf_path: Path) -> None:
 
     except Exception as exc:
         logging.exception(f"Failed to process {pdf_path.name} after {time.monotonic() - process_start:.2f}s: {exc}")
+        reason = f"Processing failed: {exc}"
+        rejected_path = None
+
         if pdf_path.exists():
-            reason = f"Processing failed: {exc}"
-            reject_file(pdf_path, reason)
+            rejected_path = reject_file(pdf_path, reason)
             append_rejected_csv_log(pdf_path, reason)
+
+        update_job_metadata(
+            metadata,
+            status="Error",
+            processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
+            summary="File failed during processing.",
+            errorMessage=reason,
+            finalPdfPath=relative_to_base(rejected_path) if rejected_path else None,
+        )
 
 def validate_pdf_file(pdf_path: Path) -> PdfValidationResult:
     if pdf_path.suffix.lower() != ".pdf":

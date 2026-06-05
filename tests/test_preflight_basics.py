@@ -83,6 +83,7 @@ def test_ensure_directories_creates_expected_folders(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "REPORTS_DIR", base_dir / "Reports")
     monkeypatch.setattr(app, "LOGS_DIR", base_dir / "Logs")
     monkeypatch.setattr(app, "REJECTED_DIR", base_dir / "Rejected")
+    monkeypatch.setattr(app, "METADATA_DIR", base_dir / "Metadata")
 
     app.ensure_directories()
 
@@ -92,6 +93,7 @@ def test_ensure_directories_creates_expected_folders(tmp_path, monkeypatch):
     assert (base_dir / "Reports").is_dir()
     assert (base_dir / "Logs").is_dir()
     assert (base_dir / "Rejected").is_dir()
+    assert (base_dir / "Metadata").is_dir()
 
 def test_build_job_id_format():
     job_id = app.build_job_id()
@@ -220,3 +222,130 @@ def test_update_job_metadata_updates_fields_and_writes_file(tmp_path, monkeypatc
     assert metadata_path == metadata_dir / "job_20260604_101530_abcd1234.json"
     assert loaded["status"] == "Processing"
     assert loaded["printReady"] is False
+
+
+def _point_app_at_temp_system(tmp_path, monkeypatch):
+    base_dir = tmp_path / "Preflight_System"
+
+    monkeypatch.setattr(app, "BASE_DIR", base_dir)
+    monkeypatch.setattr(app, "INCOMING_DIR", base_dir / "Incoming")
+    monkeypatch.setattr(app, "PASSED_DIR", base_dir / "Passed")
+    monkeypatch.setattr(app, "NEEDS_FIX_DIR", base_dir / "Needs_Fix")
+    monkeypatch.setattr(app, "REPORTS_DIR", base_dir / "Reports")
+    monkeypatch.setattr(app, "LOGS_DIR", base_dir / "Logs")
+    monkeypatch.setattr(app, "REJECTED_DIR", base_dir / "Rejected")
+    monkeypatch.setattr(app, "METADATA_DIR", base_dir / "Metadata")
+
+    app.ensure_directories()
+    return base_dir
+
+
+def _load_only_metadata_file(metadata_dir: Path):
+    metadata_files = list(metadata_dir.glob("*.json"))
+
+    assert len(metadata_files) == 1
+    with open(metadata_files[0], "r", encoding="utf-8") as f:
+        return app.json.load(f)
+
+
+def test_process_pdf_writes_rejected_metadata_when_validation_fails(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    pdf = base_dir / "Incoming" / "123456 bad.pdf"
+    pdf.write_bytes(b"not a valid pdf")
+
+    monkeypatch.setattr(
+        app,
+        "validate_pdf_file",
+        lambda _pdf: app.PdfValidationResult(is_valid=False, reason="Malformed PDF"),
+    )
+
+    app.process_pdf(pdf)
+
+    metadata = _load_only_metadata_file(base_dir / "Metadata")
+
+    assert metadata["status"] == "Rejected"
+    assert metadata["companyJobNumber"] == "123456"
+    assert metadata["summary"] == "File was rejected before preflight analysis."
+    assert metadata["errorMessage"] == "Malformed PDF"
+    assert metadata["finalPdfPath"] == "Rejected/123456 bad.pdf"
+    assert metadata["processingStartedAt"] is not None
+    assert metadata["processingFinishedAt"] is not None
+    assert not pdf.exists()
+    assert (base_dir / "Rejected" / "123456 bad.pdf").exists()
+
+
+def test_process_pdf_writes_passed_metadata_after_successful_analysis(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    pdf = base_dir / "Incoming" / "654321 ready.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    report = base_dir / "Reports" / "654321 ready_report.pdf"
+    report.write_bytes(b"%PDF-1.4 report")
+
+    trim_result = app.CheckResult(status="PASS", details="Trim matches expected size.")
+    bleed_result = app.CheckResult(status="WARNING", details="Bleed could not be fully verified.")
+    analysis = {
+        "file": pdf,
+        "preset": {"name": "generic_print_job"},
+        "print_ready": "YES",
+        "fails": [],
+        "warnings": ["Bleed could not be fully verified."],
+        "results": {
+            "trim": trim_result,
+            "bleed": bleed_result,
+            "dpi": app.CheckResult(status="PASS", details="", data={"min_dpi": 300}),
+            "color": app.CheckResult(status="PASS", details="", data={"color_summary": ["CMYK"]}),
+            "pages": app.CheckResult(status="PASS", details="", data={"actual": 2}),
+        },
+    }
+
+    monkeypatch.setattr(app, "validate_pdf_file", lambda _pdf: app.PdfValidationResult(is_valid=True))
+    monkeypatch.setattr(app, "analyze_pdf", lambda _pdf: analysis)
+    monkeypatch.setattr(app, "generate_pdf_report", lambda _analysis: report)
+    monkeypatch.setattr(app, "send_slack_notification", lambda _message: None)
+    monkeypatch.setattr(app, "send_email_notification", lambda _subject, _body: None)
+
+    app.process_pdf(pdf)
+
+    metadata = _load_only_metadata_file(base_dir / "Metadata")
+
+    assert metadata["status"] == "Passed"
+    assert metadata["printReady"] is True
+    assert metadata["summary"] == "PDF analyzed and marked as YES."
+    assert metadata["finalPdfPath"] == "Passed/654321 ready.pdf"
+    assert metadata["reportPath"] == "Reports/654321 ready_report.pdf"
+    assert metadata["issues"] == []
+    assert metadata["warnings"] == ["Bleed could not be fully verified."]
+    assert metadata["trimBleed"] == {
+        "trimStatus": "PASS",
+        "bleedStatus": "WARNING",
+        "trimDetails": "Trim matches expected size.",
+        "bleedDetails": "Bleed could not be fully verified.",
+    }
+    assert metadata["errorMessage"] is None
+    assert not pdf.exists()
+    assert (base_dir / "Passed" / "654321 ready.pdf").exists()
+
+
+def test_process_pdf_writes_error_metadata_without_double_rejecting(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    pdf = base_dir / "Incoming" / "987654 broken.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+
+    def fail_analysis(_pdf):
+        raise RuntimeError("analysis crashed")
+
+    monkeypatch.setattr(app, "validate_pdf_file", lambda _pdf: app.PdfValidationResult(is_valid=True))
+    monkeypatch.setattr(app, "analyze_pdf", fail_analysis)
+
+    app.process_pdf(pdf)
+
+    metadata = _load_only_metadata_file(base_dir / "Metadata")
+    rejected_files = list((base_dir / "Rejected").glob("*.pdf"))
+
+    assert metadata["status"] == "Error"
+    assert metadata["summary"] == "File failed during processing."
+    assert metadata["errorMessage"] == "Processing failed: analysis crashed"
+    assert metadata["finalPdfPath"] == "Rejected/987654 broken.pdf"
+    assert len(rejected_files) == 1
+    assert rejected_files[0].name == "987654 broken.pdf"
+    assert not pdf.exists()
