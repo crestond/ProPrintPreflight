@@ -22,12 +22,7 @@ pro_print_runtime.log
 *.env
 
 # Preflight generated/runtime files
-Preflight_System/Incoming/*
-Preflight_System/Passed/*
-Preflight_System/Needs_Fix/*
-Preflight_System/Rejected/*
-Preflight_System/Reports/*
-Preflight_System/Logs/*
+Preflight_System/
 
 # Keep folder structure if you add placeholder files later
 !Preflight_System/Incoming/.gitkeep
