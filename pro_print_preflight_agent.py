@@ -643,6 +643,10 @@ def build_job_id() -> str:
     random_part = secrets.token_hex(4)  # 8 hex characters for uniqueness
     return f"job_{timestamp}_{random_part}"
 
+def extract_job_id_from_filename(filename: str) -> Optional[str]:
+    match = re.match(r"^(job_\d{8}_\d{6}_[0-9a-f]{8})__", filename)
+    return match.group(1) if match else None
+
 def extract_company_job_number(filename: str) -> Optional[str]:
     match = re.match(r"^(\d{6})(?:[\s_-]|$)", filename)
     return match.group(1) if match else None
@@ -651,21 +655,34 @@ def relative_to_base(path: Path) -> str:
     # Returns a POSIX-style relative path from BASE_DIR to the given path, for cleaner logging and a reliable path for structure changes.
     return path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
 
-def create_job_metadata(pdf_path: Path) -> Dict[str, Any]:
-    job_id = build_job_id()
+def create_job_metadata(
+    pdf_path: Path,
+    *,
+    job_id: Optional[str] = None,
+    source: str = "manual_drop",
+    original_filename: Optional[str] = None,
+    stored_filename: Optional[str] = None,
+    file_size_bytes: Optional[int] = None,
+) -> Dict[str, Any]:
+    job_id = job_id or build_job_id()
+    original_filename = original_filename or pdf_path.name
+    stored_filename = stored_filename or pdf_path.name
+    if file_size_bytes is None:
+        file_size_bytes = pdf_path.stat().st_size
+
     return {
         "schemaVersion": 1,
         "jobId": job_id,
-        "source": "manual_drop",
-        "originalFilename": pdf_path.name,
-        "storedFilename": pdf_path.name,
-        "companyJobNumber": extract_company_job_number(pdf_path.name),
+        "source": source,
+        "originalFilename": original_filename,
+        "storedFilename": stored_filename,
+        "companyJobNumber": extract_company_job_number(original_filename),
         "status": "Pending",
         "printReady": None,
         "createdAt": datetime.now().isoformat(timespec="seconds"),
         "processingStartedAt": None,
         "processingFinishedAt": None,
-        "fileSizeBytes": pdf_path.stat().st_size,
+        "fileSizeBytes": file_size_bytes,
         "finalPdfPath": None,
         "reportPath": None,
         "summary": None,
@@ -692,7 +709,15 @@ def write_job_metadata(metadata: Dict[str, Any]) -> Path:
     with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
-    temp_path.replace(metadata_path)
+    for attempt in range(5):
+        try:
+            temp_path.replace(metadata_path)
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1)
+
     return metadata_path
 
 def load_job_metadata(job_id: str) -> Optional[Dict[str, Any]]:
@@ -707,6 +732,31 @@ def load_job_metadata(job_id: str) -> Optional[Dict[str, Any]]:
 def update_job_metadata(metadata: Dict[str, Any], **updates: Any) -> Path:
     metadata.update(updates)
     return write_job_metadata(metadata)
+
+def find_existing_job_metadata_for_file(pdf_path: Path) -> Optional[Dict[str, Any]]:
+    job_id = extract_job_id_from_filename(pdf_path.name)
+    if not job_id:
+        return None
+    return load_job_metadata(job_id)
+
+def build_trim_bleed_metadata(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    results = analysis["results"]
+    pages = []
+
+    for page_diag in analysis.get("page_diags", []):
+        pages.append({
+            "page": page_diag.page_number,
+            "trim": format_size(page_diag.trim_size),
+            "bleed": format_size(page_diag.bleed_size),
+        })
+
+    return {
+        "trimStatus": results["trim"].status,
+        "bleedStatus": results["bleed"].status,
+        "trimDetails": results["trim"].details,
+        "bleedDetails": results["bleed"].details,
+        "pages": pages,
+    }
     
 
 # =========================
@@ -1347,8 +1397,10 @@ def process_pdf(pdf_path: Path) -> None:
             f"(warning threshold: {LARGE_PDF_WARNING_MB} MB). Processing may take longer."
         )
     
-    metadata = create_job_metadata(pdf_path)
-    write_job_metadata(metadata)
+    metadata = find_existing_job_metadata_for_file(pdf_path)
+    if metadata is None:
+        metadata = create_job_metadata(pdf_path)
+        write_job_metadata(metadata)
 
     update_job_metadata(
         metadata,
@@ -1412,12 +1464,7 @@ def process_pdf(pdf_path: Path) -> None:
             summary=f"PDF analyzed and marked as {analysis['print_ready']}.",
             issues=analysis["fails"],
             warnings=analysis["warnings"],
-            trimBleed={
-                "trimStatus": results["trim"].status,
-                "bleedStatus": results["bleed"].status,
-                "trimDetails": results["trim"].details,
-                "bleedDetails": results["bleed"].details
-            }
+            trimBleed=build_trim_bleed_metadata(analysis),
         )
 
 

@@ -1,9 +1,12 @@
 # Basic test suite for ProPrintPreflight. This is not meant to be exhaustive, but it should cover the basics of the preflight process.
 
+from io import BytesIO
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
 import pro_print_preflight_agent as app
+import pro_print_internal_web as web
 
 
 def test_detect_preset_from_filename_postcard_5x7():
@@ -99,6 +102,14 @@ def test_build_job_id_format():
     job_id = app.build_job_id()
 
     assert re.match(r"^job_\d{8}_\d{6}_[0-9a-f]{8}$", job_id)
+
+
+def test_extract_job_id_from_uploaded_filename():
+    job_id = "job_20260605_143000_abcd1234"
+
+    assert app.extract_job_id_from_filename(f"{job_id}__Customer File.pdf") == job_id
+    assert app.extract_job_id_from_filename("Customer File.pdf") is None
+
 
 def test_extract_company_job_number_from_start():
     assert app.extract_company_job_number("123456_customer_job.pdf") == "123456"
@@ -321,6 +332,7 @@ def test_process_pdf_writes_passed_metadata_after_successful_analysis(tmp_path, 
         "bleedStatus": "WARNING",
         "trimDetails": "Trim matches expected size.",
         "bleedDetails": "Bleed could not be fully verified.",
+        "pages": [],
     }
     assert metadata["errorMessage"] is None
     assert not pdf.exists()
@@ -350,3 +362,109 @@ def test_process_pdf_writes_error_metadata_without_double_rejecting(tmp_path, mo
     assert len(rejected_files) == 1
     assert rejected_files[0].name == "987654 broken.pdf"
     assert not pdf.exists()
+
+
+def test_process_pdf_reuses_existing_ui_metadata(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    job_id = "job_20260605_143000_abcd1234"
+    stored_filename = f"{job_id}__123456 Customer File.pdf"
+    pdf = base_dir / "Incoming" / stored_filename
+    pdf.write_bytes(b"not a valid pdf")
+
+    metadata = app.create_job_metadata(
+        pdf,
+        job_id=job_id,
+        source="internal_ui",
+        original_filename="123456 Customer File.pdf",
+        stored_filename=stored_filename,
+    )
+    app.write_job_metadata(metadata)
+    monkeypatch.setattr(
+        app,
+        "validate_pdf_file",
+        lambda _pdf: app.PdfValidationResult(is_valid=False, reason="Malformed PDF"),
+    )
+
+    app.process_pdf(pdf)
+
+    metadata_files = list((base_dir / "Metadata").glob("*.json"))
+    loaded = app.load_job_metadata(job_id)
+
+    assert len(metadata_files) == 1
+    assert loaded["jobId"] == job_id
+    assert loaded["source"] == "internal_ui"
+    assert loaded["originalFilename"] == "123456 Customer File.pdf"
+    assert loaded["storedFilename"] == stored_filename
+    assert loaded["status"] == "Rejected"
+    assert loaded["finalPdfPath"] == f"Rejected/{stored_filename}"
+
+
+def test_web_sanitizes_uploaded_filename():
+    assert web.sanitize_original_filename("../123456 Big Job?.pdf") == "123456 Big Job_.pdf"
+    assert web.build_stored_upload_filename(
+        "job_20260605_143000_abcd1234",
+        "../123456 Big Job?.pdf",
+    ) == "job_20260605_143000_abcd1234__123456 Big Job_.pdf"
+
+
+def test_build_trim_bleed_metadata_includes_actual_page_sizes():
+    analysis = {
+        "results": {
+            "trim": app.CheckResult(status="INFO", details="No preset trim defined."),
+            "bleed": app.CheckResult(status="INFO", details="No preset trim defined."),
+        },
+        "page_diags": [
+            SimpleNamespace(page_number=1, trim_size=(8.5, 11.0), bleed_size=(8.75, 11.25)),
+            SimpleNamespace(page_number=2, trim_size=(8.5, 11.0), bleed_size=(8.75, 11.25)),
+        ],
+    }
+
+    metadata = app.build_trim_bleed_metadata(analysis)
+
+    assert metadata["trimStatus"] == "INFO"
+    assert metadata["bleedStatus"] == "INFO"
+    assert metadata["pages"] == [
+        {"page": 1, "trim": "8.500 x 11.000", "bleed": "8.750 x 11.250"},
+        {"page": 2, "trim": "8.500 x 11.000", "bleed": "8.750 x 11.250"},
+    ]
+
+
+def test_web_status_page_humanizes_status_and_trim_bleed_labels():
+    html = web.render_index_html().decode("utf-8")
+
+    assert "function statusLabel" in html
+    assert "replaceAll('_', ' ')" in html
+    assert "function trimBleedLabel" in html
+    assert "Info Only" in html
+    assert "trimDetails" in html
+    assert "bleedDetails" in html
+    assert "Trim: ${firstPage.trim}" in html
+    assert "Bleed: ${firstPage.bleed}" in html
+    assert "actualValues.join('\\n')" in html
+    assert "replaceAll('\\n', '<br>')" in html
+
+
+def test_web_upload_writes_metadata_before_incoming_pdf(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    job_id = "job_20260605_143000_abcd1234"
+    body = b"%PDF-1.4 test"
+
+    monkeypatch.setattr(app, "build_job_id", lambda: job_id)
+
+    metadata = web.write_upload_to_incoming(
+        "123456 Customer File.pdf",
+        BytesIO(body),
+        len(body),
+    )
+
+    stored_filename = f"{job_id}__123456 Customer File.pdf"
+    loaded = app.load_job_metadata(job_id)
+
+    assert metadata["jobId"] == job_id
+    assert metadata["source"] == "internal_ui"
+    assert metadata["originalFilename"] == "123456 Customer File.pdf"
+    assert metadata["storedFilename"] == stored_filename
+    assert metadata["fileSizeBytes"] == len(body)
+    assert loaded == metadata
+    assert (base_dir / "Incoming" / stored_filename).read_bytes() == body
+    assert not (base_dir / "Upload_Staging" / f"{job_id}.uploading").exists()

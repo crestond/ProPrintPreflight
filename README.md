@@ -93,6 +93,14 @@ Run the packaged executable:
 powershell -ExecutionPolicy Bypass -File .\scripts\run_agent.ps1
 ```
 
+Run the internal upload/status UI from source:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_web.ps1
+```
+
+The internal UI opens at `http://127.0.0.1:8080/`. Keep the preflight agent running in a separate PowerShell window; the UI uploads PDFs into `Preflight_System\Incoming`, and the agent performs the actual PDF processing.
+
 Build/update the executable:
 
 ```powershell
