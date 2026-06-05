@@ -170,6 +170,7 @@ def test_write_job_metadata_creates_json_file(tmp_path, monkeypatch):
 
     assert metadata_path == metadata_dir / "job_20240604_101530_abcd1234.json"
     assert metadata_path.exists()
+    assert not (metadata_dir / "job_20240604_101530_abcd1234.json.tmp").exists()
 
     with open(metadata_path, "r", encoding="utf-8") as f:
         saved_metadata = app.json.load(f)

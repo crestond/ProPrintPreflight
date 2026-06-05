@@ -687,10 +687,12 @@ def write_job_metadata(metadata: Dict[str, Any]) -> Path:
     
     METADATA_DIR.mkdir(parents=True, exist_ok=True)
     metadata_path = METADATA_DIR / f"{job_id}.json"
+    temp_path = METADATA_DIR / f"{job_id}.json.tmp"
 
-    with open(metadata_path, "w", encoding="utf-8") as f:
+    with open(temp_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
+    temp_path.replace(metadata_path)
     return metadata_path
 
 def load_job_metadata(job_id: str) -> Optional[Dict[str, Any]]:
