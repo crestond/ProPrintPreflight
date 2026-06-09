@@ -98,6 +98,38 @@ def test_ensure_directories_creates_expected_folders(tmp_path, monkeypatch):
     assert (base_dir / "Rejected").is_dir()
     assert (base_dir / "Metadata").is_dir()
 
+
+def test_load_config_reads_storage_flags(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        app.json.dumps({
+            "base_dir": "Preflight_System",
+            "storage": {
+                "retain_processed_pdfs": False,
+                "retain_rejected_files": False,
+                "generate_reports": False,
+                "retain_reports": False,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(app, "CONFIG_FILE", config_path)
+    monkeypatch.setattr(app, "SCRIPT_DIR", tmp_path)
+    monkeypatch.setattr(app, "RETAIN_PROCESSED_PDFS", True)
+    monkeypatch.setattr(app, "RETAIN_REJECTED_FILES", True)
+    monkeypatch.setattr(app, "GENERATE_REPORTS", True)
+    monkeypatch.setattr(app, "RETAIN_REPORTS", True)
+
+    app.load_config()
+
+    assert app.BASE_DIR == (tmp_path / "Preflight_System").resolve()
+    assert app.RETAIN_PROCESSED_PDFS is False
+    assert app.RETAIN_REJECTED_FILES is False
+    assert app.GENERATE_REPORTS is False
+    assert app.RETAIN_REPORTS is False
+
+
 def test_build_job_id_format():
     job_id = app.build_job_id()
 
@@ -146,6 +178,8 @@ def test_create_job_metadata_uses_minimal_pending_shape(tmp_path):
     assert metadata["fileSizeBytes"] == pdf.stat().st_size
     assert metadata["finalPdfPath"] is None
     assert metadata["reportPath"] is None
+    assert metadata["sourcePdfRetained"] is None
+    assert metadata["reportRetained"] is None
     assert metadata["summary"] is None
     assert metadata["issues"] == []
     assert metadata["warnings"] == []
@@ -286,6 +320,28 @@ def test_process_pdf_writes_rejected_metadata_when_validation_fails(tmp_path, mo
     assert (base_dir / "Rejected" / "123456 bad.pdf").exists()
 
 
+def test_process_pdf_deletes_rejected_file_when_retention_disabled(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    pdf = base_dir / "Incoming" / "123456 bad.pdf"
+    pdf.write_bytes(b"not a valid pdf")
+
+    monkeypatch.setattr(app, "RETAIN_REJECTED_FILES", False)
+    monkeypatch.setattr(
+        app,
+        "validate_pdf_file",
+        lambda _pdf: app.PdfValidationResult(is_valid=False, reason="Malformed PDF"),
+    )
+
+    app.process_pdf(pdf)
+
+    metadata = _load_only_metadata_file(base_dir / "Metadata")
+
+    assert metadata["status"] == "Rejected"
+    assert metadata["finalPdfPath"] is None
+    assert metadata["sourcePdfRetained"] is False
+    assert not (base_dir / "Rejected" / "123456 bad.pdf").exists()
+
+
 def test_process_pdf_writes_passed_metadata_after_successful_analysis(tmp_path, monkeypatch):
     base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
     pdf = base_dir / "Incoming" / "654321 ready.pdf"
@@ -337,6 +393,51 @@ def test_process_pdf_writes_passed_metadata_after_successful_analysis(tmp_path, 
     assert metadata["errorMessage"] is None
     assert not pdf.exists()
     assert (base_dir / "Passed" / "654321 ready.pdf").exists()
+
+
+def test_process_pdf_deletes_processed_pdf_when_retention_disabled(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    pdf = base_dir / "Incoming" / "654321 ready.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    report = base_dir / "Reports" / "654321 ready_report.pdf"
+    report.write_bytes(b"%PDF-1.4 report")
+
+    analysis = {
+        "file": pdf,
+        "preset": {"name": "generic_print_job"},
+        "print_ready": "YES",
+        "fails": [],
+        "warnings": [],
+        "results": {
+            "trim": app.CheckResult(status="INFO", details="Trim recorded."),
+            "bleed": app.CheckResult(status="INFO", details="Bleed recorded."),
+            "dpi": app.CheckResult(status="PASS", details="", data={"min_dpi": 300}),
+            "color": app.CheckResult(status="PASS", details="", data={"color_summary": ["CMYK"]}),
+            "pages": app.CheckResult(status="PASS", details="", data={"actual": 1}),
+        },
+        "page_diags": [],
+    }
+
+    monkeypatch.setattr(app, "RETAIN_PROCESSED_PDFS", False)
+    monkeypatch.setattr(app, "RETAIN_REPORTS", True)
+    monkeypatch.setattr(app, "GENERATE_REPORTS", True)
+    monkeypatch.setattr(app, "validate_pdf_file", lambda _pdf: app.PdfValidationResult(is_valid=True))
+    monkeypatch.setattr(app, "analyze_pdf", lambda _pdf: analysis)
+    monkeypatch.setattr(app, "generate_pdf_report", lambda _analysis: report)
+    monkeypatch.setattr(app, "send_slack_notification", lambda _message: None)
+    monkeypatch.setattr(app, "send_email_notification", lambda _subject, _body: None)
+
+    app.process_pdf(pdf)
+
+    metadata = _load_only_metadata_file(base_dir / "Metadata")
+
+    assert metadata["status"] == "Passed"
+    assert metadata["finalPdfPath"] is None
+    assert metadata["reportPath"] == "Reports/654321 ready_report.pdf"
+    assert metadata["sourcePdfRetained"] is False
+    assert metadata["reportRetained"] is True
+    assert not (base_dir / "Passed" / "654321 ready.pdf").exists()
+    assert report.exists()
 
 
 def test_process_pdf_writes_error_metadata_without_double_rejecting(tmp_path, monkeypatch):

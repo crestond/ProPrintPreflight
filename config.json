@@ -5,5 +5,11 @@
     "target_dpi": 300,
     "strict_rgb_fail": false,
     "auto_rename_print_ready": false,
-    "auto_reject_failed": false
+    "auto_reject_failed": false,
+    "storage": {
+        "retain_processed_pdfs": false,
+        "retain_rejected_files": false,
+        "generate_reports": true,
+        "retain_reports": true
+    }
 }

@@ -125,6 +125,10 @@ TRIFOLD_EQUAL_PANEL_WARNING = True
 AUTO_RENAME_PRINT_READY = False
 AUTO_REJECT_FAILED = False
 BRANDED_REPORT_MODE = True
+RETAIN_PROCESSED_PDFS = True
+RETAIN_REJECTED_FILES = True
+GENERATE_REPORTS = True
+RETAIN_REPORTS = True
 
 # ---- Notifications ----
 ENABLE_SLACK = False
@@ -235,6 +239,7 @@ def load_config() -> None:
     global WATCH_INTERVAL_SECONDS, PROCESS_ONCE, FILE_STABLE_SECONDS, FILE_READY_TIMEOUT_SECONDS
     global LARGE_PDF_WARNING_MB
     global MIN_DPI, TARGET_DPI, STRICT_RGB_FAIL, AUTO_RENAME_PRINT_READY, AUTO_REJECT_FAILED
+    global RETAIN_PROCESSED_PDFS, RETAIN_REJECTED_FILES, GENERATE_REPORTS, RETAIN_REPORTS
     global ENABLE_SLACK, SLACK_WEBHOOK_URL, ENABLE_EMAIL, EMAIL_FROM, EMAIL_TO
     global SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD
 
@@ -279,6 +284,12 @@ def load_config() -> None:
     STRICT_RGB_FAIL = _config_bool(config, "strict_rgb_fail", STRICT_RGB_FAIL)
     AUTO_RENAME_PRINT_READY = _config_bool(config, "auto_rename_print_ready", AUTO_RENAME_PRINT_READY)
     AUTO_REJECT_FAILED = _config_bool(config, "auto_reject_failed", AUTO_REJECT_FAILED)
+    storage_config = config.get("storage", {})
+    if isinstance(storage_config, dict):
+        RETAIN_PROCESSED_PDFS = _config_bool(storage_config, "retain_processed_pdfs", RETAIN_PROCESSED_PDFS)
+        RETAIN_REJECTED_FILES = _config_bool(storage_config, "retain_rejected_files", RETAIN_REJECTED_FILES)
+        GENERATE_REPORTS = _config_bool(storage_config, "generate_reports", GENERATE_REPORTS)
+        RETAIN_REPORTS = _config_bool(storage_config, "retain_reports", RETAIN_REPORTS)
 
     ENABLE_SLACK = _config_bool(config, "enable_slack", ENABLE_SLACK)
     SLACK_WEBHOOK_URL = str(config.get("slack_webhook_url", SLACK_WEBHOOK_URL) or "")
@@ -565,6 +576,20 @@ def safe_move_file(src: Path, dst_dir: Path, new_name: Optional[str] = None) -> 
     return target
 
 
+def delete_file_if_configured(file_path: Optional[Path], reason: str) -> bool:
+    if file_path is None:
+        return False
+    try:
+        if not file_path.exists():
+            return False
+        file_path.unlink()
+        logging.info(f"Deleted {file_path.name}: {reason}")
+        return True
+    except OSError as exc:
+        logging.error(f"Could not delete {file_path}: {exc}")
+        return False
+
+
 def append_csv_log(row: Dict[str, Any]) -> None:
     log_file = LOGS_DIR / "preflight_log.csv"
     fieldnames = [
@@ -685,6 +710,8 @@ def create_job_metadata(
         "fileSizeBytes": file_size_bytes,
         "finalPdfPath": None,
         "reportPath": None,
+        "sourcePdfRetained": None,
+        "reportRetained": None,
         "summary": None,
         "issues": [],
         "warnings": [],
@@ -1413,6 +1440,9 @@ def process_pdf(pdf_path: Path) -> None:
         if not validation.is_valid:
             rejected_path = reject_file(pdf_path, validation.reason)
             append_rejected_csv_log(pdf_path, validation.reason)
+            rejected_retained = RETAIN_REJECTED_FILES
+            if not RETAIN_REJECTED_FILES:
+                rejected_retained = not delete_file_if_configured(rejected_path, "rejected file retention disabled")
             logging.info(f"Finished rejecting {pdf_path.name} in {time.monotonic() - process_start:.2f}s")
             
             update_job_metadata(
@@ -1421,7 +1451,8 @@ def process_pdf(pdf_path: Path) -> None:
                 processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
                 summary="File was rejected before preflight analysis.",
                 errorMessage=validation.reason,
-                finalPdfPath=relative_to_base(rejected_path),
+                finalPdfPath=relative_to_base(rejected_path) if rejected_retained else None,
+                sourcePdfRetained=rejected_retained,
             )
             
             return
@@ -1432,9 +1463,11 @@ def process_pdf(pdf_path: Path) -> None:
         analysis = analyze_pdf(pdf_path)
         logging.info(f"Analysis completed for {pdf_path.name} in {time.monotonic() - analysis_start:.2f}s")
 
-        report_start = time.monotonic()
-        report_path = generate_pdf_report(analysis)
-        logging.info(f"Report generation completed for {pdf_path.name} in {time.monotonic() - report_start:.2f}s")
+        report_path = None
+        if GENERATE_REPORTS:
+            report_start = time.monotonic()
+            report_path = generate_pdf_report(analysis)
+            logging.info(f"Report generation completed for {pdf_path.name} in {time.monotonic() - report_start:.2f}s")
 
         if analysis["print_ready"] == "YES":
             new_name = maybe_rename_print_ready_file(pdf_path, analysis)
@@ -1450,17 +1483,29 @@ def process_pdf(pdf_path: Path) -> None:
 
         logging.info(f"PRINT READY: {analysis['print_ready']}")
         logging.info(f"Moved to: {moved_to}")
-        logging.info(f"Report written: {report_path}")
+        if report_path:
+            logging.info(f"Report written: {report_path}")
+        else:
+            logging.info("Report generation skipped by storage config.")
 
         results = analysis["results"]
+        source_pdf_retained = RETAIN_PROCESSED_PDFS
+        if not RETAIN_PROCESSED_PDFS:
+            source_pdf_retained = not delete_file_if_configured(moved_to, "processed PDF retention disabled")
+
+        report_retained = report_path is not None
+        if report_path and not RETAIN_REPORTS:
+            report_retained = not delete_file_if_configured(report_path, "report retention disabled")
 
         update_job_metadata(
             metadata,
             status=destination_label,
             printReady=(analysis["print_ready"] == "YES"),
             processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
-            finalPdfPath=relative_to_base(moved_to),
-            reportPath=relative_to_base(report_path),
+            finalPdfPath=relative_to_base(moved_to) if source_pdf_retained else None,
+            reportPath=relative_to_base(report_path) if report_retained and report_path else None,
+            sourcePdfRetained=source_pdf_retained,
+            reportRetained=report_retained,
             summary=f"PDF analyzed and marked as {analysis['print_ready']}.",
             issues=analysis["fails"],
             warnings=analysis["warnings"],
@@ -1481,7 +1526,7 @@ def process_pdf(pdf_path: Path) -> None:
             "page_count": results["pages"].data.get("actual"),
         })
 
-        message = build_notification_message(analysis, moved_to, report_path)
+        message = build_notification_message(analysis, moved_to, report_path or Path("Report generation skipped"))
         send_slack_notification(message)
         send_email_notification(f"Preflight Result - {analysis['file'].name}", message)
         logging.info(f"Finished processing {moved_to.name} in {time.monotonic() - process_start:.2f}s")
@@ -1494,6 +1539,12 @@ def process_pdf(pdf_path: Path) -> None:
         if pdf_path.exists():
             rejected_path = reject_file(pdf_path, reason)
             append_rejected_csv_log(pdf_path, reason)
+            if not RETAIN_REJECTED_FILES:
+                rejected_retained = not delete_file_if_configured(rejected_path, "error file retention disabled")
+            else:
+                rejected_retained = True
+        else:
+            rejected_retained = False
 
         update_job_metadata(
             metadata,
@@ -1501,7 +1552,8 @@ def process_pdf(pdf_path: Path) -> None:
             processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
             summary="File failed during processing.",
             errorMessage=reason,
-            finalPdfPath=relative_to_base(rejected_path) if rejected_path else None,
+            finalPdfPath=relative_to_base(rejected_path) if rejected_path and rejected_retained else None,
+            sourcePdfRetained=rejected_retained,
         )
 
 def validate_pdf_file(pdf_path: Path) -> PdfValidationResult:
