@@ -38,8 +38,12 @@ Recommended server folder:
 ```text
 C:\ProPrintPreflight\
   ProPrintPreflightAgent.exe
+  pro_print_preflight_agent.py
+  pro_print_internal_web.py
   config.json
   README.md
+  requirements.txt
+  scripts\
   Preflight_System\
     Incoming\
     Passed\
@@ -47,6 +51,8 @@ C:\ProPrintPreflight\
     Rejected\
     Reports\
     Logs\
+    Metadata\
+    Upload_Staging\
 ```
 
 The app will create missing `Preflight_System` folders at startup, but creating them manually makes the deployment easier to inspect.
@@ -101,6 +107,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_web.ps1
 
 The internal UI opens at `http://127.0.0.1:8080/`. Keep the preflight agent running in a separate PowerShell window; the UI uploads PDFs into `Preflight_System\Incoming`, and the agent performs the actual PDF processing.
 
+Run the internal upload/status UI for LAN testing from a server or VM:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_web_server.ps1
+```
+
+This listens on `0.0.0.0:8080`, so other computers on the same network can reach the UI at `http://SERVER-IP:8080/`. Keep this internal-only unless IIS, HTTPS, and authentication are added.
+
+Allow inbound access to the direct test UI on the server/VM:
+
+```powershell
+New-NetFirewallRule -DisplayName "Pro Print Internal UI 8080" -Direction Inbound -Protocol TCP -LocalPort 8080 -Action Allow
+```
+
 Build/update the executable:
 
 ```powershell
@@ -108,3 +128,34 @@ Build/update the executable:
 ```
 
 The build script runs a syntax check, runs tests, builds with PyInstaller, and replaces the root `ProPrintPreflightAgent.exe` with the new build.
+
+## VM / Server Smoke Test
+
+For a local Windows Server VM or internal pilot, run two PowerShell windows from `C:\ProPrintPreflight`.
+
+Worker:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_dev.ps1
+```
+
+LAN web UI:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_web_server.ps1
+```
+
+Then browse from another workstation to:
+
+```text
+http://SERVER-IP:8080/
+```
+
+Smoke test with a small PDF and confirm:
+
+- the job appears in the UI
+- status updates after processing
+- trim/bleed values display
+- the report link opens
+- metadata is written under `Preflight_System\Metadata`
+- processed source PDFs are retained or deleted according to `config.json`
