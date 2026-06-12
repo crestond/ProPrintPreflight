@@ -35,6 +35,7 @@ Preflight_System/
 # Build/package output
 build/
 dist/
+release/
 *.spec
 *.exe
 
