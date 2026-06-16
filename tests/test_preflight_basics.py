@@ -109,6 +109,9 @@ def test_load_config_reads_storage_flags(tmp_path, monkeypatch):
                 "retain_rejected_files": False,
                 "generate_reports": False,
                 "retain_reports": False,
+                "min_free_space_mb": 1024,
+                "report_retention_days": 14,
+                "metadata_retention_days": 180,
             },
         }),
         encoding="utf-8",
@@ -120,6 +123,9 @@ def test_load_config_reads_storage_flags(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "RETAIN_REJECTED_FILES", True)
     monkeypatch.setattr(app, "GENERATE_REPORTS", True)
     monkeypatch.setattr(app, "RETAIN_REPORTS", True)
+    monkeypatch.setattr(app, "MIN_FREE_SPACE_MB", 2048)
+    monkeypatch.setattr(app, "REPORT_RETENTION_DAYS", 30)
+    monkeypatch.setattr(app, "METADATA_RETENTION_DAYS", 365)
 
     app.load_config()
 
@@ -128,6 +134,9 @@ def test_load_config_reads_storage_flags(tmp_path, monkeypatch):
     assert app.RETAIN_REJECTED_FILES is False
     assert app.GENERATE_REPORTS is False
     assert app.RETAIN_REPORTS is False
+    assert app.MIN_FREE_SPACE_MB == 1024
+    assert app.REPORT_RETENTION_DAYS == 14
+    assert app.METADATA_RETENTION_DAYS == 180
 
 
 def test_build_job_id_format():
@@ -342,6 +351,31 @@ def test_process_pdf_deletes_rejected_file_when_retention_disabled(tmp_path, mon
     assert not (base_dir / "Rejected" / "123456 bad.pdf").exists()
 
 
+def test_process_pdf_marks_error_when_free_space_is_below_threshold(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    pdf = base_dir / "Incoming" / "123456 low-space.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+
+    monkeypatch.setattr(app, "RETAIN_REJECTED_FILES", False)
+    monkeypatch.setattr(
+        app,
+        "has_min_free_space",
+        lambda required_bytes=0: (False, "Insufficient free disk space. Minimum required is 2048 MB."),
+    )
+
+    app.process_pdf(pdf)
+
+    metadata = _load_only_metadata_file(base_dir / "Metadata")
+
+    assert metadata["status"] == "Error"
+    assert metadata["summary"] == "File was not processed because server storage is below the configured safety threshold."
+    assert metadata["errorMessage"] == "Insufficient free disk space. Minimum required is 2048 MB."
+    assert metadata["finalPdfPath"] is None
+    assert metadata["sourcePdfRetained"] is False
+    assert not pdf.exists()
+    assert not (base_dir / "Rejected" / "123456 low-space.pdf").exists()
+
+
 def test_process_pdf_writes_passed_metadata_after_successful_analysis(tmp_path, monkeypatch):
     base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
     pdf = base_dir / "Incoming" / "654321 ready.pdf"
@@ -508,6 +542,18 @@ def test_web_sanitizes_uploaded_filename():
     ) == "job_20260605_143000_abcd1234__123456 Big Job_.pdf"
 
 
+def test_web_reads_configured_bind_address(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        app.json.dumps({"web": {"host": "127.0.0.1", "port": 9090}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(app, "CONFIG_FILE", config_path)
+
+    assert web.get_configured_bind_address(default_host="0.0.0.0", default_port=8080) == ("127.0.0.1", 9090)
+
+
 def test_build_trim_bleed_metadata_includes_actual_page_sizes():
     analysis = {
         "results": {
@@ -569,3 +615,24 @@ def test_web_upload_writes_metadata_before_incoming_pdf(tmp_path, monkeypatch):
     assert loaded == metadata
     assert (base_dir / "Incoming" / stored_filename).read_bytes() == body
     assert not (base_dir / "Upload_Staging" / f"{job_id}.uploading").exists()
+
+
+def test_web_upload_rejects_when_free_space_is_below_threshold(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    body = b"%PDF-1.4 test"
+
+    monkeypatch.setattr(
+        app,
+        "has_min_free_space",
+        lambda required_bytes=0: (False, "Insufficient free disk space. Minimum required is 2048 MB."),
+    )
+
+    try:
+        web.write_upload_to_incoming("123456 Customer File.pdf", BytesIO(body), len(body))
+    except ValueError as exc:
+        assert str(exc) == "Insufficient free disk space. Minimum required is 2048 MB."
+    else:
+        raise AssertionError("Expected low disk space upload to be rejected.")
+
+    assert list((base_dir / "Incoming").glob("*")) == []
+    assert list((base_dir / "Metadata").glob("*.json")) == []

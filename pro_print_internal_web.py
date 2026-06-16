@@ -22,8 +22,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 import pro_print_preflight_agent as agent
 
 
-HOST = "127.0.0.1"
-PORT = 8080
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8080
 UPLOAD_STAGING_DIR_NAME = "Upload_Staging"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
@@ -31,6 +31,37 @@ CHUNK_SIZE = 1024 * 1024
 
 SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
 JOB_FILENAME_RE = re.compile(r"^(job_\d{8}_\d{6}_[0-9a-f]{8})__(.+)$")
+
+
+def get_configured_bind_address(default_host: str = DEFAULT_HOST, default_port: int = DEFAULT_PORT) -> tuple[str, int]:
+    host = default_host
+    port = default_port
+
+    try:
+        with open(agent.CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception:
+        return host, port
+
+    if not isinstance(config, dict):
+        return host, port
+
+    web_config = config.get("web", {})
+    if not isinstance(web_config, dict):
+        return host, port
+
+    configured_host = web_config.get("host")
+    if isinstance(configured_host, str) and configured_host.strip():
+        host = configured_host.strip()
+
+    try:
+        configured_port = int(web_config.get("port", port))
+        if 1 <= configured_port <= 65535:
+            port = configured_port
+    except (TypeError, ValueError):
+        pass
+
+    return host, port
 
 
 def sanitize_original_filename(filename: str) -> str:
@@ -100,6 +131,9 @@ def write_upload_to_incoming(original_filename: str, body_reader, content_length
         raise ValueError("Upload is too large.")
     if not original_filename.lower().endswith(".pdf"):
         raise ValueError("Only PDF uploads are accepted.")
+    storage_ok, storage_reason = agent.has_min_free_space(required_bytes=content_length)
+    if not storage_ok:
+        raise ValueError(storage_reason)
 
     safe_original = sanitize_original_filename(original_filename)
 
@@ -368,9 +402,13 @@ class ProPrintWebHandler(BaseHTTPRequestHandler):
         logging.info("Internal UI: " + format, *args)
 
 
-def run_server(host: str = HOST, port: int = PORT) -> None:
+def run_server(host: Optional[str] = None, port: Optional[int] = None) -> None:
     agent.load_config()
     agent.ensure_directories()
+    if host is None or port is None:
+        configured_host, configured_port = get_configured_bind_address()
+        host = configured_host if host is None else host
+        port = configured_port if port is None else port
     server = ThreadingHTTPServer((host, port), ProPrintWebHandler)
     logging.info(f"Pro Print internal UI running at http://{host}:{port}/")
     print(f"Pro Print internal UI running at http://{host}:{port}/")

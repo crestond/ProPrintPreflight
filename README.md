@@ -115,6 +115,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_web_server.ps1
 
 This listens on `0.0.0.0:8080`, so other computers on the same network can reach the UI at `http://SERVER-IP:8080/`. Keep this internal-only unless IIS, HTTPS, and authentication are added.
 
+For IIS reverse-proxy deployment, keep the web app bound to localhost in `config.json`:
+
+```json
+"web": {
+    "host": "127.0.0.1",
+    "port": 8080
+}
+```
+
+With this setting, IIS should be the only front door. IIS can expose `http://SERVER-NAME/` or `https://SERVER-NAME/` and proxy requests to `http://127.0.0.1:8080/`.
+
 Allow inbound access to the direct test UI on the server/VM:
 
 ```powershell
@@ -159,3 +170,39 @@ Smoke test with a small PDF and confirm:
 - the report link opens
 - metadata is written under `Preflight_System\Metadata`
 - processed source PDFs are retained or deleted according to `config.json`
+
+## Storage Safety
+
+Storage behavior is configured in `config.json`:
+
+```json
+"storage": {
+    "retain_processed_pdfs": false,
+    "retain_rejected_files": false,
+    "generate_reports": true,
+    "retain_reports": true,
+    "min_free_space_mb": 2048,
+    "report_retention_days": 30,
+    "metadata_retention_days": 365
+}
+```
+
+`min_free_space_mb` is a safety floor. The web UI rejects uploads that would put the server below this free-space threshold, and the worker refuses to process new files if the server is already below it. This avoids filling the server disk with uploads or report generation.
+
+`report_retention_days` and `metadata_retention_days` define the intended cleanup policy. They are configuration placeholders for scheduled cleanup; the current app enforces the free-space safety check and PDF/report retention flags.
+
+## IIS Deployment Shape
+
+For IIS, run `ProPrintPreflightWeb.exe` on the server with `web.host` set to `127.0.0.1` and `web.port` set to `8080`. Then configure IIS as a reverse proxy:
+
+```text
+Browser -> IIS :80/:443 -> http://127.0.0.1:8080/
+```
+
+The preflight worker still runs separately:
+
+```text
+ProPrintPreflightAgent.exe
+```
+
+IIS handles the browser-facing concerns such as HTTPS, Windows authentication, and friendly URLs. The Pro Print web process remains local-only behind IIS.

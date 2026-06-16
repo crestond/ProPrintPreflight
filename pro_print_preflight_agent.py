@@ -129,6 +129,9 @@ RETAIN_PROCESSED_PDFS = True
 RETAIN_REJECTED_FILES = True
 GENERATE_REPORTS = True
 RETAIN_REPORTS = True
+MIN_FREE_SPACE_MB = 2048
+REPORT_RETENTION_DAYS = 30
+METADATA_RETENTION_DAYS = 365
 
 # ---- Notifications ----
 ENABLE_SLACK = False
@@ -240,6 +243,7 @@ def load_config() -> None:
     global LARGE_PDF_WARNING_MB
     global MIN_DPI, TARGET_DPI, STRICT_RGB_FAIL, AUTO_RENAME_PRINT_READY, AUTO_REJECT_FAILED
     global RETAIN_PROCESSED_PDFS, RETAIN_REJECTED_FILES, GENERATE_REPORTS, RETAIN_REPORTS
+    global MIN_FREE_SPACE_MB, REPORT_RETENTION_DAYS, METADATA_RETENTION_DAYS
     global ENABLE_SLACK, SLACK_WEBHOOK_URL, ENABLE_EMAIL, EMAIL_FROM, EMAIL_TO
     global SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD
 
@@ -290,6 +294,9 @@ def load_config() -> None:
         RETAIN_REJECTED_FILES = _config_bool(storage_config, "retain_rejected_files", RETAIN_REJECTED_FILES)
         GENERATE_REPORTS = _config_bool(storage_config, "generate_reports", GENERATE_REPORTS)
         RETAIN_REPORTS = _config_bool(storage_config, "retain_reports", RETAIN_REPORTS)
+        MIN_FREE_SPACE_MB = max(0, _config_int(storage_config, "min_free_space_mb", MIN_FREE_SPACE_MB))
+        REPORT_RETENTION_DAYS = max(0, _config_int(storage_config, "report_retention_days", REPORT_RETENTION_DAYS))
+        METADATA_RETENTION_DAYS = max(0, _config_int(storage_config, "metadata_retention_days", METADATA_RETENTION_DAYS))
 
     ENABLE_SLACK = _config_bool(config, "enable_slack", ENABLE_SLACK)
     SLACK_WEBHOOK_URL = str(config.get("slack_webhook_url", SLACK_WEBHOOK_URL) or "")
@@ -574,6 +581,30 @@ def safe_move_file(src: Path, dst_dir: Path, new_name: Optional[str] = None) -> 
 
     shutil.move(str(src), str(target))
     return target
+
+
+def get_storage_check_path() -> Path:
+    path = BASE_DIR
+    while not path.exists() and path.parent != path:
+        path = path.parent
+    return path
+
+
+def has_min_free_space(required_bytes: int = 0) -> Tuple[bool, str]:
+    check_path = get_storage_check_path()
+    free_bytes = shutil.disk_usage(check_path).free
+    min_free_bytes = MIN_FREE_SPACE_MB * 1024 * 1024
+    free_after_bytes = free_bytes - max(required_bytes, 0)
+
+    if free_after_bytes >= min_free_bytes:
+        return True, ""
+
+    return (
+        False,
+        "Insufficient free disk space. "
+        f"Free after this operation would be {format_file_size(max(free_after_bytes, 0))}; "
+        f"minimum required is {MIN_FREE_SPACE_MB} MB.",
+    )
 
 
 def delete_file_if_configured(file_path: Optional[Path], reason: str) -> bool:
@@ -1436,6 +1467,26 @@ def process_pdf(pdf_path: Path) -> None:
     )
 
     try:
+        storage_ok, storage_reason = has_min_free_space()
+        if not storage_ok:
+            rejected_path = reject_file(pdf_path, storage_reason)
+            append_rejected_csv_log(pdf_path, storage_reason)
+            rejected_retained = RETAIN_REJECTED_FILES
+            if not RETAIN_REJECTED_FILES:
+                rejected_retained = not delete_file_if_configured(rejected_path, "low disk space file retention disabled")
+
+            update_job_metadata(
+                metadata,
+                status="Error",
+                processingFinishedAt=datetime.now().isoformat(timespec="seconds"),
+                summary="File was not processed because server storage is below the configured safety threshold.",
+                errorMessage=storage_reason,
+                finalPdfPath=relative_to_base(rejected_path) if rejected_retained else None,
+                sourcePdfRetained=rejected_retained,
+            )
+            logging.error(f"Skipped processing {pdf_path.name}: {storage_reason}")
+            return
+
         validation = validate_pdf_file(pdf_path)
         if not validation.is_valid:
             rejected_path = reject_file(pdf_path, validation.reason)

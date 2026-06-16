@@ -10,6 +10,13 @@
         "retain_processed_pdfs": false,
         "retain_rejected_files": false,
         "generate_reports": true,
-        "retain_reports": true
+        "retain_reports": true,
+        "min_free_space_mb": 2048,
+        "report_retention_days": 30,
+        "metadata_retention_days": 365
+    },
+    "web": {
+        "host": "127.0.0.1",
+        "port": 8080
     }
 }
