@@ -17,6 +17,50 @@ def test_detect_preset_from_filename_postcard_5x7():
     assert preset["expected_pages"] == 2
 
 
+def test_detect_preset_from_filename_does_not_strict_match_booklet_without_size():
+    preset = app.detect_preset_from_filename("Healthcare Booklet - Cover Pages _2026_ _1_.pdf")
+
+    assert preset["name"] == "generic_print_job"
+    assert preset["trim"] is None
+
+
+def test_detect_preset_from_filename_matches_booklet_with_size():
+    preset = app.detect_preset_from_filename("Healthcare Booklet 8.5x11 Cover Pages.pdf")
+
+    assert preset["name"] == "booklet_8.5x11"
+    assert preset["trim"] == (8.5, 11.0)
+
+
+def test_check_page_count_uses_short_human_wording():
+    class FakeDoc:
+        def __init__(self, page_count):
+            self.page_count = page_count
+
+        def __len__(self):
+            return self.page_count
+
+    no_preset = app.check_page_count(FakeDoc(4), {"expected_pages": None})
+    mismatch = app.check_page_count(FakeDoc(4), {"expected_pages": 2})
+    matched = app.check_page_count(FakeDoc(1), {"expected_pages": 1})
+
+    assert no_preset.details == "4 pgs. No preset page count requirement."
+    assert mismatch.details == "4 pgs. Expected 2 pgs."
+    assert matched.details == "1 pg. Matches preset page count."
+
+
+def test_report_results_hide_fold_and_overprint():
+    results = {
+        "trim": app.CheckResult(status="PASS", details="Trim ok."),
+        "fold": app.CheckResult(status="INFO", details="Fold placeholder."),
+        "overprint": app.CheckResult(status="INFO", details="Overprint placeholder."),
+        "pages": app.CheckResult(status="PASS", details="2 pgs."),
+    }
+
+    visible_names = [name for name, _result in app.report_results_for_display(results)]
+
+    assert visible_names == ["trim", "pages"]
+
+
 def test_get_app_dir_uses_executable_parent_when_frozen(tmp_path, monkeypatch):
     fake_exe = tmp_path / "ProPrintPreflightAgent.exe"
 
@@ -422,6 +466,8 @@ def test_process_pdf_writes_passed_metadata_after_successful_analysis(tmp_path, 
         "bleedStatus": "WARNING",
         "trimDetails": "Trim matches expected size.",
         "bleedDetails": "Bleed could not be fully verified.",
+        "trimSummary": "Trim matches expected size.",
+        "bleedSummary": "Bleed could not be fully verified.",
         "pages": [],
     }
     assert metadata["errorMessage"] is None
@@ -542,6 +588,49 @@ def test_web_sanitizes_uploaded_filename():
     ) == "job_20260605_143000_abcd1234__123456 Big Job_.pdf"
 
 
+def test_web_finds_existing_upload_by_original_filename(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    job_id = "job_20260605_143000_abcd1234"
+    stored_filename = f"{job_id}__123456 Customer File.pdf"
+    metadata = app.create_job_metadata(
+        base_dir / "Passed" / stored_filename,
+        job_id=job_id,
+        source="internal_ui",
+        original_filename="123456 Customer File.pdf",
+        stored_filename=stored_filename,
+        file_size_bytes=13,
+    )
+    app.write_job_metadata(metadata)
+
+    match = web.find_existing_job_by_upload_name("123456 customer file.pdf")
+
+    assert match is not None
+    assert match["jobId"] == job_id
+
+
+def test_web_builds_duplicate_upload_response_before_streaming_file(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    job_id = "job_20260605_143000_abcd1234"
+    stored_filename = f"{job_id}__123456 Customer File.pdf"
+    metadata = app.create_job_metadata(
+        base_dir / "Passed" / stored_filename,
+        job_id=job_id,
+        source="internal_ui",
+        original_filename="123456 Customer File.pdf",
+        stored_filename=stored_filename,
+        file_size_bytes=13,
+    )
+    app.write_job_metadata(metadata)
+
+    response = web.build_duplicate_upload_response("123456 customer file.pdf")
+
+    assert response == {
+        "duplicate": True,
+        "filename": "123456 customer file.pdf",
+        "message": 'A PDF named "123456 customer file.pdf" has already been uploaded.',
+    }
+
+
 def test_web_reads_configured_bind_address(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -570,24 +659,79 @@ def test_build_trim_bleed_metadata_includes_actual_page_sizes():
 
     assert metadata["trimStatus"] == "INFO"
     assert metadata["bleedStatus"] == "INFO"
+    assert metadata["trimSummary"] == "No preset trim defined."
+    assert metadata["bleedSummary"] == "No preset trim defined."
     assert metadata["pages"] == [
         {"page": 1, "trim": "8.500 x 11.000", "bleed": "8.750 x 11.250"},
         {"page": 2, "trim": "8.500 x 11.000", "bleed": "8.750 x 11.250"},
     ]
 
 
+def test_build_trim_bleed_metadata_summarizes_repeated_mismatches():
+    analysis = {
+        "results": {
+            "trim": app.CheckResult(
+                status="FAIL",
+                details="long trim details",
+                data={
+                    "bad_pages": [
+                        {"page": page, "found": (10.75, 11.146), "expected": (8.5, 11.0)}
+                        for page in range(1, 28)
+                    ],
+                    "expected_trim": (8.5, 11.0),
+                },
+            ),
+            "bleed": app.CheckResult(
+                status="FAIL",
+                details="long bleed details",
+                data={
+                    "bad_pages": [
+                        {"page": page, "found": (10.75, 11.146), "expected": (8.75, 11.25)}
+                        for page in range(1, 28)
+                    ],
+                    "expected_bleed_size": (8.75, 11.25),
+                },
+            ),
+        },
+        "page_diags": [
+            SimpleNamespace(page_number=page, trim_size=(10.75, 11.146), bleed_size=(10.75, 11.146))
+            for page in range(1, 28)
+        ],
+    }
+
+    metadata = app.build_trim_bleed_metadata(analysis)
+
+    assert metadata["trimSummary"] == "All 27 page(s) have trim size 10.750 x 11.146; expected 8.500 x 11.000."
+    assert metadata["bleedSummary"] == "All 27 page(s) have bleed size 10.750 x 11.146; expected 8.750 x 11.250."
+    assert "page(s): 1" not in metadata["trimSummary"]
+
+
 def test_web_status_page_humanizes_status_and_trim_bleed_labels():
     html = web.render_index_html().decode("utf-8")
 
     assert "function statusLabel" in html
+    assert 'rel="icon"' in html
+    assert 'href="/favicon.ico"' in html
+    assert "Made by Quinn and Creston" in html
+    assert "font-style: italic" in html
+    assert "function formatTimestamp" in html
+    assert "toLocaleString" in html
     assert "replaceAll('_', ' ')" in html
     assert "function trimBleedLabel" in html
     assert "Info Only" in html
+    assert "trimSummary" in html
+    assert "bleedSummary" in html
     assert "trimDetails" in html
     assert "bleedDetails" in html
     assert "Trim: ${firstPage.trim}" in html
     assert "Bleed: ${firstPage.bleed}" in html
-    assert "actualValues.join('\\n')" in html
+    assert "['FAIL', 'WARNING'].includes(trimBleed?.trimStatus)" in html
+    assert "['FAIL', 'WARNING'].includes(trimBleed?.bleedStatus)" in html
+    assert "No trim/bleed issues" in html
+    assert "/api/check-duplicate?filename=" in html
+    assert "Checking ${file.name}" in html
+    assert "const successMessage = 'Upload complete.'" in html
+    assert "setTimeout" in html
     assert "replaceAll('\\n', '<br>')" in html
 
 
@@ -615,6 +759,31 @@ def test_web_upload_writes_metadata_before_incoming_pdf(tmp_path, monkeypatch):
     assert loaded == metadata
     assert (base_dir / "Incoming" / stored_filename).read_bytes() == body
     assert not (base_dir / "Upload_Staging" / f"{job_id}.uploading").exists()
+
+
+def test_web_upload_rejects_duplicate_original_filename(tmp_path, monkeypatch):
+    base_dir = _point_app_at_temp_system(tmp_path, monkeypatch)
+    job_id = "job_20260605_143000_abcd1234"
+    stored_filename = f"{job_id}__123456 Customer File.pdf"
+    metadata = app.create_job_metadata(
+        base_dir / "Passed" / stored_filename,
+        job_id=job_id,
+        source="internal_ui",
+        original_filename="123456 Customer File.pdf",
+        stored_filename=stored_filename,
+        file_size_bytes=13,
+    )
+    app.write_job_metadata(metadata)
+
+    try:
+        web.write_upload_to_incoming("123456 customer file.pdf", BytesIO(b"%PDF-1.4 test"), 13)
+    except ValueError as exc:
+        assert str(exc) == 'A PDF named "123456 customer file.pdf" has already been uploaded.'
+    else:
+        raise AssertionError("Expected duplicate upload to be rejected.")
+
+    assert list((base_dir / "Incoming").glob("*")) == []
+    assert not (base_dir / "Upload_Staging").exists()
 
 
 def test_web_upload_rejects_when_free_space_is_below_threshold(tmp_path, monkeypatch):

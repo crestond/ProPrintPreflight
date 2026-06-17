@@ -10,8 +10,12 @@ Each release zip should include only the files needed to run the agent on a Wind
 
 ```text
 ProPrintPreflightAgent.exe
+ProPrintPreflightWeb.exe
 config.json
 README.md
+assets\PreflightIcon.ico
+scripts\run_agent.ps1
+scripts\run_web_exe_server.ps1
 ```
 
 Do not include development or runtime folders in the release zip:

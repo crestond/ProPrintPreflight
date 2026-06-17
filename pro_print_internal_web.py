@@ -27,6 +27,7 @@ DEFAULT_PORT = 8080
 UPLOAD_STAGING_DIR_NAME = "Upload_Staging"
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
+FAVICON_RELATIVE_PATH = Path("assets") / "PreflightIcon.ico"
 
 
 SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
@@ -93,7 +94,7 @@ def metadata_sort_key(metadata: Dict[str, Any]) -> str:
     )
 
 
-def load_recent_jobs(limit: int = 100) -> List[Dict[str, Any]]:
+def load_recent_jobs(limit: Optional[int] = 100) -> List[Dict[str, Any]]:
     agent.METADATA_DIR.mkdir(parents=True, exist_ok=True)
     jobs: List[Dict[str, Any]] = []
 
@@ -109,7 +110,33 @@ def load_recent_jobs(limit: int = 100) -> List[Dict[str, Any]]:
             jobs.append(metadata)
 
     jobs.sort(key=metadata_sort_key, reverse=True)
-    return jobs[:limit]
+    return jobs if limit is None else jobs[:limit]
+
+
+def normalized_upload_name(filename: str) -> str:
+    return sanitize_original_filename(filename).casefold()
+
+
+def find_existing_job_by_upload_name(original_filename: str) -> Optional[Dict[str, Any]]:
+    target_name = normalized_upload_name(original_filename)
+    for job in load_recent_jobs(limit=None):
+        candidates = [
+            job.get("originalFilename"),
+            display_filename_from_stored(str(job.get("storedFilename") or "")),
+        ]
+        if any(normalized_upload_name(str(candidate)) == target_name for candidate in candidates if candidate):
+            return job
+    return None
+
+
+def build_duplicate_upload_response(original_filename: str) -> Dict[str, Any]:
+    safe_original = sanitize_original_filename(original_filename)
+    duplicate = find_existing_job_by_upload_name(safe_original) is not None
+    return {
+        "duplicate": duplicate,
+        "filename": safe_original,
+        "message": f'A PDF named "{safe_original}" has already been uploaded.' if duplicate else "",
+    }
 
 
 def create_upload_metadata(job_id: str, original_filename: str, stored_filename: str, file_size_bytes: int) -> Dict[str, Any]:
@@ -131,11 +158,13 @@ def write_upload_to_incoming(original_filename: str, body_reader, content_length
         raise ValueError("Upload is too large.")
     if not original_filename.lower().endswith(".pdf"):
         raise ValueError("Only PDF uploads are accepted.")
+    safe_original = sanitize_original_filename(original_filename)
+    if find_existing_job_by_upload_name(safe_original):
+        raise ValueError(f'A PDF named "{safe_original}" has already been uploaded.')
+
     storage_ok, storage_reason = agent.has_min_free_space(required_bytes=content_length)
     if not storage_ok:
         raise ValueError(storage_reason)
-
-    safe_original = sanitize_original_filename(original_filename)
 
     job_id = agent.build_job_id()
     stored_filename = build_stored_upload_filename(job_id, safe_original)
@@ -168,11 +197,13 @@ def render_index_html() -> bytes:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pro Print Preflight</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <style>
     :root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; }
     body { margin: 0; background: #f6f7f9; color: #1f2933; }
     header { background: #111827; color: white; padding: 18px 28px; }
     h1 { font-size: 22px; margin: 0; font-weight: 700; letter-spacing: 0; }
+    .byline { margin-top: 4px; font-size: 13px; font-style: italic; color: #cbd5e1; }
     main { max-width: 1120px; margin: 0 auto; padding: 24px; }
     .upload { border: 2px dashed #8a96a8; background: white; border-radius: 8px; padding: 34px; text-align: center; }
     .upload.dragover { border-color: #0f766e; background: #eefcf8; }
@@ -195,7 +226,10 @@ def render_index_html() -> bytes:
   </style>
 </head>
 <body>
-  <header><h1>Pro Print Preflight</h1></header>
+  <header>
+    <h1>Pro Print Preflight</h1>
+    <div class="byline">Made by Quinn and Creston</div>
+  </header>
   <main>
     <section id="dropZone" class="upload">
       <input id="fileInput" type="file" accept="application/pdf,.pdf" multiple hidden>
@@ -239,6 +273,17 @@ def render_index_html() -> bytes:
         return;
       }
       for (const file of pdfs) {
+        message.textContent = `Checking ${file.name}...`;
+        const duplicateResponse = await fetch(`/api/check-duplicate?filename=${encodeURIComponent(file.name)}`);
+        if (!duplicateResponse.ok) {
+          message.textContent = 'Could not check for duplicate uploads.';
+          return;
+        }
+        const duplicate = await duplicateResponse.json();
+        if (duplicate.duplicate) {
+          message.textContent = duplicate.message || `${file.name} has already been uploaded.`;
+          return;
+        }
         message.textContent = `Uploading ${file.name}...`;
         const response = await fetch(`/api/upload?filename=${encodeURIComponent(file.name)}`, {
           method: 'POST',
@@ -251,7 +296,13 @@ def render_index_html() -> bytes:
           return;
         }
       }
-      message.textContent = 'Upload complete. Waiting for preflight processing.';
+      const successMessage = 'Upload complete.';
+      message.textContent = successMessage;
+      setTimeout(() => {
+        if (message.textContent === successMessage) {
+          message.textContent = '';
+        }
+      }, 5000);
       fileInput.value = '';
       loadJobs();
     }
@@ -262,6 +313,23 @@ def render_index_html() -> bytes:
 
     function statusLabel(status) {
       return String(status || 'Pending').replaceAll('_', ' ');
+    }
+
+    function formatTimestamp(value) {
+      if (!value) {
+        return '';
+      }
+      const parsed = new Date(String(value));
+      if (Number.isNaN(parsed.getTime())) {
+        return value;
+      }
+      return parsed.toLocaleString([], {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit'
+      });
     }
 
     function checkLabel(status) {
@@ -293,10 +361,16 @@ def render_index_html() -> bytes:
       if (pageCount > 1 && actualValues.length) {
         actualValues.push(`${pageCount} pages checked`);
       }
-      const trimDetails = trimBleed?.trimDetails || 'No trim details yet.';
-      const bleedDetails = trimBleed?.bleedDetails || 'No bleed details yet.';
-      const checkDetails = `Trim check (${trimStatus || 'Pending'}): ${trimDetails}\nBleed check (${bleedStatus || 'Pending'}): ${bleedDetails}`;
-      return actualValues.length ? `${actualValues.join('\\n')}\\n${checkDetails}` : checkDetails;
+      const issueDetails = [];
+      if (['FAIL', 'WARNING'].includes(trimBleed?.trimStatus)) {
+        const trimDetails = trimBleed?.trimSummary || trimBleed?.trimDetails || 'No trim details yet.';
+        issueDetails.push(`Trim (${trimStatus || 'Needs Review'}): ${trimDetails}`);
+      }
+      if (['FAIL', 'WARNING'].includes(trimBleed?.bleedStatus)) {
+        const bleedDetails = trimBleed?.bleedSummary || trimBleed?.bleedDetails || 'No bleed details yet.';
+        issueDetails.push(`Bleed (${bleedStatus || 'Needs Review'}): ${bleedDetails}`);
+      }
+      return [...actualValues, ...issueDetails].join('\\n') || 'No trim/bleed issues';
     }
 
     async function loadJobs() {
@@ -311,12 +385,12 @@ def render_index_html() -> bytes:
         const trim = job.trimBleed || {};
         const trimBleed = trimBleedLabel(trim);
         const displayStatus = statusLabel(job.status);
-        const report = job.reportPath ? `<a href="/files/${encodeURIComponent(job.reportPath)}">Report</a>` : '<span class="muted">Not ready</span>';
+        const report = job.reportPath ? `<a href="/files/${encodeURIComponent(job.reportPath)}">Download</a>` : '<span class="muted">Not ready</span>';
         return `<tr>
           <td>${escapeHtml(job.originalFilename || job.storedFilename)}</td>
           <td class="status ${escapeHtml(job.status)}">${escapeHtml(displayStatus)}</td>
           <td>${escapeHtml(trimBleed).replaceAll('\\n', '<br>')}</td>
-          <td>${escapeHtml(job.createdAt || '')}</td>
+          <td>${escapeHtml(formatTimestamp(job.createdAt))}</td>
           <td>${report}</td>
         </tr>`;
       }).join('');
@@ -340,6 +414,13 @@ class ProPrintWebHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/jobs":
             self.send_json({"jobs": load_recent_jobs()})
+            return
+        if parsed.path == "/api/check-duplicate":
+            filename = parse_qs(parsed.query).get("filename", ["upload.pdf"])[0]
+            self.send_json(build_duplicate_upload_response(filename))
+            return
+        if parsed.path == "/favicon.ico":
+            self.send_favicon()
             return
         if parsed.path.startswith("/files/"):
             self.send_preflight_file(unquote(parsed.path.removeprefix("/files/")))
@@ -386,6 +467,14 @@ class ProPrintWebHandler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+
+    def send_favicon(self) -> None:
+        icon_path = agent.SCRIPT_DIR / FAVICON_RELATIVE_PATH
+        if not icon_path.exists() or not icon_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        self.send_bytes(icon_path.read_bytes(), "image/x-icon")
 
     def send_json(self, payload: Dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")

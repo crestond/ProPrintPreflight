@@ -149,6 +149,7 @@ SMTP_PASSWORD = ""
 PRESETS = {
     "postcard_5x7": {
         "keywords": ["postcard", "5x7", "5 x 7"],
+        "required_keywords": ["5x7", "5 x 7"],
         "trim": (5.0, 7.0),
         "bleed": 0.125,
         "expected_pages": 2,
@@ -158,6 +159,7 @@ PRESETS = {
     },
     "postcard_4x6": {
         "keywords": ["postcard", "4x6", "4 x 6"],
+        "required_keywords": ["4x6", "4 x 6"],
         "trim": (4.0, 6.0),
         "bleed": 0.125,
         "expected_pages": 2,
@@ -167,6 +169,7 @@ PRESETS = {
     },
     "flyer_8.5x11_single": {
         "keywords": ["flyer", "8.5x11", "8.5 x 11", "single-sided flyer", "single sided flyer"],
+        "required_keywords": ["8.5x11", "8.5 x 11"],
         "trim": (8.5, 11.0),
         "bleed": 0.125,
         "expected_pages": 1,
@@ -176,6 +179,7 @@ PRESETS = {
     },
     "flyer_8.5x11_double": {
         "keywords": ["flyer", "8.5x11", "8.5 x 11", "double-sided flyer", "double sided flyer"],
+        "required_keywords": ["8.5x11", "8.5 x 11"],
         "trim": (8.5, 11.0),
         "bleed": 0.125,
         "expected_pages": 2,
@@ -185,6 +189,7 @@ PRESETS = {
     },
     "trifold_8.5x11": {
         "keywords": ["trifold", "tri-fold", "tri fold", "brochure", "8.5x11", "8.5 x 11"],
+        "required_keywords": ["trifold", "tri-fold", "tri fold", "8.5x11", "8.5 x 11"],
         "trim": (11.0, 8.5),
         "bleed": 0.125,
         "expected_pages": 2,
@@ -194,6 +199,7 @@ PRESETS = {
     },
     "booklet_8.5x11": {
         "keywords": ["booklet", "8.5x11", "8.5 x 11"],
+        "required_keywords": ["8.5x11", "8.5 x 11"],
         "trim": (8.5, 11.0),
         "bleed": 0.125,
         "expected_pages": None,
@@ -416,6 +422,10 @@ def detect_preset_from_filename(filename: str) -> Dict[str, Any]:
     best_score = -1
 
     for preset_name, preset in PRESETS.items():
+        required_keywords = preset.get("required_keywords", [])
+        if required_keywords and not any(keyword.lower() in lower_name for keyword in required_keywords):
+            continue
+
         score = sum(1 for keyword in preset["keywords"] if keyword.lower() in lower_name)
         if score > best_score and score > 0:
             best_name = preset_name
@@ -797,6 +807,57 @@ def find_existing_job_metadata_for_file(pdf_path: Path) -> Optional[Dict[str, An
         return None
     return load_job_metadata(job_id)
 
+def format_page_ranges(page_numbers: List[int]) -> str:
+    if not page_numbers:
+        return "none"
+
+    sorted_pages = sorted(set(page_numbers))
+    ranges = []
+    start = sorted_pages[0]
+    previous = sorted_pages[0]
+
+    for page_number in sorted_pages[1:]:
+        if page_number == previous + 1:
+            previous = page_number
+            continue
+        ranges.append(f"{start}-{previous}" if start != previous else str(start))
+        start = page_number
+        previous = page_number
+
+    ranges.append(f"{start}-{previous}" if start != previous else str(start))
+    return ", ".join(ranges)
+
+def summarize_size_mismatches(
+    label: str,
+    check_result: CheckResult,
+    expected_key: str,
+    total_pages: int,
+) -> str:
+    bad_pages = check_result.data.get("bad_pages", [])
+    if not bad_pages:
+        return check_result.details
+
+    expected = format_size(check_result.data.get(expected_key))
+    found_groups: Dict[str, List[int]] = {}
+    for bad_page in bad_pages:
+        found = format_size(bad_page.get("found"))
+        found_groups.setdefault(found, []).append(bad_page.get("page"))
+
+    if len(bad_pages) == total_pages and len(found_groups) == 1:
+        found = next(iter(found_groups))
+        return f"All {total_pages} page(s) have {label} {found}; expected {expected}."
+
+    group_summaries = [
+        f"pages {format_page_ranges([p for p in pages if p is not None])}: {found}"
+        for found, pages in found_groups.items()
+    ]
+    return f"{len(bad_pages)} of {total_pages} page(s) have {label} mismatch. Expected {expected}. Found " + "; ".join(group_summaries) + "."
+
+def summarize_trim_bleed_check(label: str, check_result: CheckResult, total_pages: int) -> str:
+    if label == "trim":
+        return summarize_size_mismatches("trim size", check_result, "expected_trim", total_pages)
+    return summarize_size_mismatches("bleed size", check_result, "expected_bleed_size", total_pages)
+
 def build_trim_bleed_metadata(analysis: Dict[str, Any]) -> Dict[str, Any]:
     results = analysis["results"]
     pages = []
@@ -808,11 +869,15 @@ def build_trim_bleed_metadata(analysis: Dict[str, Any]) -> Dict[str, Any]:
             "bleed": format_size(page_diag.bleed_size),
         })
 
+    total_pages = len(pages)
+
     return {
         "trimStatus": results["trim"].status,
         "bleedStatus": results["bleed"].status,
         "trimDetails": results["trim"].details,
         "bleedDetails": results["bleed"].details,
+        "trimSummary": summarize_trim_bleed_check("trim", results["trim"], total_pages),
+        "bleedSummary": summarize_trim_bleed_check("bleed", results["bleed"], total_pages),
         "pages": pages,
     }
     
@@ -1041,25 +1106,27 @@ def check_overprint(doc: fitz.Document) -> CheckResult:
 def check_page_count(doc: fitz.Document, preset: Dict[str, Any]) -> CheckResult:
     expected = preset.get("expected_pages")
     actual = len(doc)
+    actual_text = f"{actual} pg{'s' if actual != 1 else ''}."
 
     if expected is None:
         return CheckResult(
             status="INFO",
-            details=f"Page count recorded: {actual}. No preset page count requirement.",
+            details=f"{actual_text} No preset page count requirement.",
             data={"actual": actual, "expected": None},
         )
 
     if actual != expected:
         status = "FAIL" if FAIL_ON_PAGE_COUNT_MISMATCH else "WARNING"
+        expected_text = f"{expected} pg{'s' if expected != 1 else ''}."
         return CheckResult(
             status=status,
-            details=f"Page count mismatch. Found {actual}, expected {expected}.",
+            details=f"{actual_text} Expected {expected_text}",
             data={"actual": actual, "expected": expected},
         )
 
     return CheckResult(
         status="PASS",
-        details=f"Page count matches preset: {actual} page(s).",
+        details=f"{actual_text} Matches preset page count.",
         data={"actual": actual, "expected": expected},
     )
 
@@ -1226,6 +1293,13 @@ def report_cell(value: Any, style: ParagraphStyle) -> Paragraph:
     return Paragraph(escape(str(value)), style)
 
 
+REPORT_CHECKS_TO_HIDE = {"fold", "overprint"}
+
+
+def report_results_for_display(results: Dict[str, CheckResult]) -> List[Tuple[str, CheckResult]]:
+    return [(name, result) for name, result in results.items() if name not in REPORT_CHECKS_TO_HIDE]
+
+
 def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
     pdf_path: Path = analysis["file"]
     report_name = f"{pdf_path.stem}_report.pdf"
@@ -1340,7 +1414,7 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
         report_cell("Status", table_header_style),
         report_cell("Details", table_header_style),
     ]]
-    for check_name, result in analysis["results"].items():
+    for check_name, result in report_results_for_display(analysis["results"]):
         result_table_data.append([
             report_cell(check_name.replace("_", " ").title(), table_cell_style),
             report_cell(result.status, table_cell_style),
