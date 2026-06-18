@@ -1300,6 +1300,12 @@ def report_results_for_display(results: Dict[str, CheckResult]) -> List[Tuple[st
     return [(name, result) for name, result in results.items() if name not in REPORT_CHECKS_TO_HIDE]
 
 
+def report_display_filename(analysis: Dict[str, Any]) -> str:
+    pdf_path: Path = analysis["file"]
+    display_name = str(analysis.get("originalFilename") or pdf_path.name).strip()
+    return Path(display_name).name or pdf_path.name
+
+
 def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
     pdf_path: Path = analysis["file"]
     report_name = f"{pdf_path.stem}_report.pdf"
@@ -1367,7 +1373,7 @@ def generate_pdf_report(analysis: Dict[str, Any]) -> Path:
         story.extend(build_brand_header(analysis["print_ready"]))
         story.append(Spacer(1, 0.2 * inch))
 
-    title = Paragraph(f"Preflight Report - {escape(pdf_path.name)}", report_title_style)
+    title = Paragraph(f"Preflight Report - {escape(report_display_filename(analysis))}", report_title_style)
     story.append(title)
     story.append(Spacer(1, 0.15 * inch))
 
@@ -1586,6 +1592,7 @@ def process_pdf(pdf_path: Path) -> None:
 
         analysis_start = time.monotonic()
         analysis = analyze_pdf(pdf_path)
+        analysis["originalFilename"] = metadata.get("originalFilename") or pdf_path.name
         logging.info(f"Analysis completed for {pdf_path.name} in {time.monotonic() - analysis_start:.2f}s")
 
         report_path = None

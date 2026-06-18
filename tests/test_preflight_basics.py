@@ -61,6 +61,15 @@ def test_report_results_hide_fold_and_overprint():
     assert visible_names == ["trim", "pages"]
 
 
+def test_report_display_filename_prefers_original_filename():
+    analysis = {
+        "file": Path("job_20260613_abc123__Customer Proof.pdf"),
+        "originalFilename": "Customer Proof.pdf",
+    }
+
+    assert app.report_display_filename(analysis) == "Customer Proof.pdf"
+
+
 def test_get_app_dir_uses_executable_parent_when_frozen(tmp_path, monkeypatch):
     fake_exe = tmp_path / "ProPrintPreflightAgent.exe"
 
